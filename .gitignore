@@ -1,0 +1,11 @@
+__pycache__/
+.pytest_cache/
+*.py[cod]
+outputs/
+data/era5/
+data/aifs/
+data/ibtracs/
+data/label_cache/
+*.ckpt
+*.npz
+
