@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -13,28 +12,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tclocator.common import DomainConfig, PHASE0_REQUIRED_MESSAGE, iter_files, load_config
-from tclocator.dataset import SyntheticTCDataset
+from tclocator.dataset import SyntheticTCDataset, label_cache_path, parse_era5_valid_time_from_name
 from tclocator.io_aifs import parse_aifs_filename, read_aifs_channels
 from tclocator.io_era5 import read_era5_channels
 from tclocator.labels import generate_labels, read_ibtracs, records_at_time, save_label_npz
 import pandas as pd
-
-
-def _parse_time_from_stem(path: Path) -> pd.Timestamp | None:
-    """Best-effort parse of YYYYMMDDHH-style ERA5 file names."""
-
-    match = re.search(r"(\d{10}|\d{8}T\d{2}|\d{8}_\d{2})", path.stem)
-    if not match:
-        return None
-    raw = match.group(1).replace("T", "").replace("_", "")
-    return pd.Timestamp(f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}T{raw[8:10]}:00:00Z")
-
-
-def _cache_path(config: dict[str, Any], domain_name: str, source: Path) -> Path:
-    """Return label cache path for one source file."""
-
-    root = Path(config.get("paths", {}).get("label_cache_dir", ROOT / "data" / "label_cache"))
-    return root / domain_name / f"{source.stem}.npz"
 
 
 def _assert_labels_ready(config: dict[str, Any]) -> bool:
@@ -73,7 +55,7 @@ def _build_era5(config: dict[str, Any]) -> None:
     domain = DomainConfig.from_mapping(config.get("domain"))
     records = read_ibtracs(ibtracs_path, config.get("ibtracs", {}).get("col_map", {}))
     for path in files:
-        valid_time = _parse_time_from_stem(path)
+        valid_time = parse_era5_valid_time_from_name(path)
         if valid_time is None:
             print(f"Skip {path}: cannot parse valid time from filename")
             continue
@@ -86,7 +68,7 @@ def _build_era5(config: dict[str, Any]) -> None:
             domain=domain,
             label_config=config.get("labels", {}),
         )
-        out = _cache_path(config, "era5", path)
+        out = label_cache_path(config, "era5", path)
         save_label_npz(label, out)
         print(f"Wrote {out}")
 
@@ -111,7 +93,7 @@ def _build_aifs(config: dict[str, Any]) -> None:
             domain=domain,
             label_config=config.get("labels", {}),
         )
-        out = _cache_path(config, "aifs", path)
+        out = label_cache_path(config, "aifs", path)
         save_label_npz(label, out)
         print(f"Wrote {out}")
 

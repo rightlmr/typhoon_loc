@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+import re
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -30,17 +31,51 @@ class FieldSample:
     label_path: Path | None = None
 
 
-def build_era5_samples(files: Sequence[Path]) -> list[FieldSample]:
+def parse_era5_valid_time_from_name(path: str | Path) -> pd.Timestamp | None:
+    """Best-effort parse of YYYYMMDDHH-style ERA5 file names."""
+
+    match = re.search(r"(\d{10}|\d{8}T\d{2}|\d{8}_\d{2})", Path(path).stem)
+    if not match:
+        return None
+    raw = match.group(1).replace("T", "").replace("_", "")
+    return pd.Timestamp(f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}T{raw[8:10]}:00:00Z")
+
+
+def label_cache_path(config: Mapping[str, Any], domain_name: str, source: str | Path) -> Path:
+    """Return the conventional label cache path for one source field."""
+
+    root = Path(config.get("paths", {}).get("label_cache_dir", "data/label_cache"))
+    return root / domain_name / f"{Path(source).stem}.npz"
+
+
+def build_era5_samples(files: Sequence[Path], *, config: Mapping[str, Any] | None = None) -> list[FieldSample]:
     """Build ERA5 samples from files.
 
-    ERA5 valid time is data-specific; when not encoded in the file name it is
-    left as ``None`` and scripts can attach labels through cached paths.
+    ERA5 valid time is data-specific. The helper supports common
+    YYYYMMDDHH-style file stems and attaches conventional cache paths when a
+    config is supplied.
     """
 
-    return [FieldSample(path=Path(path), domain_name="era5") for path in files]
+    samples: list[FieldSample] = []
+    for path in files:
+        source = Path(path)
+        samples.append(
+            FieldSample(
+                path=source,
+                domain_name="era5",
+                valid_time=parse_era5_valid_time_from_name(source),
+                label_path=label_cache_path(config, "era5", source) if config is not None else None,
+            )
+        )
+    return samples
 
 
-def build_aifs_samples(files: Sequence[Path], *, lead_max: int | None = None) -> list[FieldSample]:
+def build_aifs_samples(
+    files: Sequence[Path],
+    *,
+    lead_max: int | None = None,
+    config: Mapping[str, Any] | None = None,
+) -> list[FieldSample]:
     """Build AIFS samples and optionally filter by forecast lead."""
 
     samples: list[FieldSample] = []
@@ -54,6 +89,7 @@ def build_aifs_samples(files: Sequence[Path], *, lead_max: int | None = None) ->
                 domain_name="aifs",
                 valid_time=pd.Timestamp(meta.valid_time),
                 lead_hour=meta.forecast_hour,
+                label_path=label_cache_path(config, "aifs", path) if config is not None else None,
             )
         )
     return samples

@@ -93,7 +93,7 @@ def _real_dataset(config: dict[str, Any]) -> FieldDataset | None:
         print("No AIFS files found; fine-tuning skipped.")
         return None
     lead_max = int(config.get("finetune", {}).get("lead_max"))
-    samples = build_aifs_samples(files, lead_max=lead_max)
+    samples = build_aifs_samples(files, lead_max=lead_max, config=config)
     if not samples:
         print("No AIFS samples remain after lead_max filtering; fine-tuning skipped.")
         return None

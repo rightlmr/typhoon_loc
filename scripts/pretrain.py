@@ -16,7 +16,7 @@ import torch
 from torch.utils.data import DataLoader, random_split
 
 from tclocator.common import PHASE0_REQUIRED_MESSAGE, iter_files, load_config, resolve_device, set_seed
-from tclocator.dataset import FieldDataset, FieldSample, SyntheticTCDataset, collate_batch
+from tclocator.dataset import FieldDataset, SyntheticTCDataset, build_era5_samples, collate_batch
 from tclocator.decode import decode_heatmap
 from tclocator.labels import read_ibtracs
 from tclocator.losses import LossConfig, TCLocatorLoss
@@ -116,7 +116,7 @@ def _real_dataset(config: dict[str, Any]) -> FieldDataset | None:
     norm_stats = load_norm_stats(norm_path) if norm_path.exists() else None
     ib_path = Path(config.get("paths", {}).get("ibtracs_csv", ""))
     records = read_ibtracs(ib_path, config.get("ibtracs", {}).get("col_map", {})) if ib_path.exists() else None
-    samples = [FieldSample(path=path, domain_name="era5") for path in files]
+    samples = build_era5_samples(files, config=config)
     return FieldDataset(samples=samples, config=config, norm_stats=norm_stats, ibtracs_records=records)
 
 
