@@ -1,0 +1,46 @@
+channels: ["msl", "vo_850", "t_500"]
+domain: {lat_min: 0.0, lat_max: 70.0, lon_min: 100.0, lon_max: 320.0, res: 0.25}
+paths:
+  era5_dir: "F:/typhoon_loc/data/era5"
+  aifs_dir: "F:/typhoon_loc/data/aifs"
+  ibtracs_csv: "F:/typhoon_loc/data/ibtracs/ibtracs.csv"
+  output_dir: "F:/typhoon_loc/outputs"
+  label_cache_dir: "F:/typhoon_loc/data/label_cache"
+  norm_stats_era5: "F:/typhoon_loc/outputs/norm_stats_era5.json"
+  norm_stats_aifs: "F:/typhoon_loc/outputs/norm_stats_aifs.json"
+  pretrain_ckpt: "F:/typhoon_loc/outputs/pretrain_best.ckpt"
+  finetune_ckpt: "F:/typhoon_loc/outputs/finetune_best.ckpt"
+era5:
+  var_map: {msl: "msl", t_500: "t_500", u850: "u850", v850: "v850"}
+  vo850_from_uv: true
+ibtracs:
+  col_map: {time: "ISO_TIME", sid: "SID", lat: "LAT", lon: "LON"}
+labels:
+  mode: null
+  search_radius_km: 300
+  sigma_px: 3
+decode:
+  conf_thresh: 0.3
+  lat_filter: [0.0, 40.0]
+finetune:
+  freeze_encoder: true
+  lead_max: null
+  lr_scale: 0.1
+loss: {focal_alpha: 2, focal_beta: 4, lambda_offset: 1.0}
+tracking: {max_step_km: 800, min_len: 4, expected_step_hours: 6}
+norm:
+  method: "zscore"
+  channel_methods: {}
+model:
+  base_channels: 32
+  pad_multiple: 32
+train:
+  batch_size: 2
+  epochs: 30
+  lr: 0.0003
+  weight_decay: 0.01
+  patience: 6
+  num_workers: 0
+seed: 42
+device: "auto"
+
