@@ -44,7 +44,7 @@ def _build_references(config: dict[str, Any]) -> pd.DataFrame:
     """Build AIFS references with true and field centers."""
 
     paths = config.get("paths", {})
-    files = iter_files(paths.get("aifs_dir", ""), [".grib2", ".grb2", ".grib"])
+    files = iter_files(paths.get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"])
     ib_path = Path(paths.get("ibtracs_csv", ""))
     if not files or not ib_path.exists():
         return pd.DataFrame()

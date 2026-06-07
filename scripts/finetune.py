@@ -88,7 +88,7 @@ def _train(model: torch.nn.Module, train_loader: DataLoader, val_loader: DataLoa
 def _real_dataset(config: dict[str, Any]) -> FieldDataset | None:
     """Build real AIFS fine-tuning dataset."""
 
-    files = iter_files(config.get("paths", {}).get("aifs_dir", ""), [".grib2", ".grb2", ".grib"])
+    files = iter_files(config.get("paths", {}).get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"])
     if not files:
         print("No AIFS files found; fine-tuning skipped.")
         return None

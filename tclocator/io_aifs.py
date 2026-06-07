@@ -1,4 +1,4 @@
-"""AIFS GRIB2 reading, filename parsing, domain cropping, and channel stacking."""
+"""AIFS GRIB2/PT reading, filename parsing, domain cropping, and channel stacking."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ import re
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+import torch
 
 from tclocator.common import DomainConfig, build_lat_lon, crop_regular_latlon_grid
 from tclocator.vorticity import calc_vo850
@@ -60,18 +61,45 @@ GRIB_KEYS: dict[str, tuple[str, str, int]] = {
 }
 
 
+DEFAULT_TENSOR_CHANNEL_ORDER = [
+    "u10",
+    "v10",
+    "msl",
+    "t2",
+    "u850",
+    "v850",
+    "q850",
+    "t850",
+    "u700",
+    "v700",
+    "q700",
+    "t700",
+    "u500",
+    "v500",
+    "q500",
+    "t500",
+]
+
+
+def _canonical_name(internal_name: str) -> str:
+    """Normalize common internal aliases."""
+
+    aliases = {"mslp": "msl", "t_850": "t850", "t_700": "t700", "t_500": "t500"}
+    return aliases.get(internal_name, internal_name)
+
+
 def parse_aifs_filename(path: str | Path) -> AIFSFileMeta:
     """Parse supported AIFS file names into forecast metadata."""
 
     name = Path(path).name
-    m1 = re.fullmatch(r"AIFS_(\d{4})_(\d{2})_(\d{2})_(\d{2})_FCST_(\d+)h\.grib2", name)
+    m1 = re.fullmatch(r"AIFS_(\d{4})_(\d{2})_(\d{2})_(\d{2})_FCST_(\d+)h\.(?:grib2|grb2|grib|pt)", name)
     if m1:
         year, month, day, hour, lead = m1.groups()
         init_time = datetime(int(year), int(month), int(day), int(hour), tzinfo=timezone.utc)
         forecast_hour = int(lead)
         return AIFSFileMeta(init_time, forecast_hour, init_time + timedelta(hours=forecast_hour))
 
-    m2 = re.fullmatch(r"(\d{14})-(\d+)h-oper-fc\.grib2", name)
+    m2 = re.fullmatch(r"(\d{14})-(\d+)h-oper-fc\.(?:grib2|grb2|grib|pt)", name)
     if m2:
         init_raw, lead = m2.groups()
         init_time = datetime.strptime(init_raw, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
@@ -92,7 +120,11 @@ def _require_pygrib() -> Any:
 def read_aifs_variable(path: str | Path, internal_name: str) -> np.ndarray:
     """Read one configured variable from an AIFS GRIB2 file."""
 
-    key = internal_name.replace("_", "") if internal_name not in GRIB_KEYS else internal_name
+    if Path(path).suffix.lower() == ".pt":
+        return read_aifs_pt_variable(path, internal_name)
+
+    key = _canonical_name(internal_name)
+    key = key.replace("_", "") if key not in GRIB_KEYS else key
     if key not in GRIB_KEYS:
         raise KeyError(f"Unsupported AIFS internal variable: {internal_name}")
     short_name, type_of_level, level = GRIB_KEYS[key]
@@ -102,6 +134,39 @@ def read_aifs_variable(path: str | Path, internal_name: str) -> np.ndarray:
         if not selected:
             raise KeyError(f"GRIB variable not found: {GRIB_KEYS[key]} in {path}")
         return np.asarray(selected[0].values, dtype=np.float32)
+
+
+def read_aifs_pt_variable(
+    path: str | Path,
+    internal_name: str,
+    *,
+    tensor_channel_order: Sequence[str] | None = None,
+) -> np.ndarray:
+    """Read one variable from a serialized AIFS tensor.
+
+    The supplied data uses a ``[16, 721, 1440]`` tensor. The default channel
+    order follows the GRIB key table order used by the data producer:
+    u10, v10, msl, t2, u/v/q/t at 850, 700, and 500 hPa.
+    """
+
+    order = [_canonical_name(name) for name in (tensor_channel_order or DEFAULT_TENSOR_CHANNEL_ORDER)]
+    key = _canonical_name(internal_name)
+    if key not in order:
+        raise KeyError(f"AIFS tensor channel not configured: {internal_name}; available={order}")
+    tensor = torch.load(path, map_location="cpu")
+    if isinstance(tensor, dict):
+        for candidate in ("tensor", "data", "field", "fields"):
+            if candidate in tensor:
+                tensor = tensor[candidate]
+                break
+    if not hasattr(tensor, "shape"):
+        raise TypeError(f"Unsupported AIFS .pt payload type: {type(tensor)!r}")
+    arr = tensor.detach().cpu().numpy() if hasattr(tensor, "detach") else np.asarray(tensor)
+    if arr.ndim != 3:
+        raise ValueError(f"AIFS .pt tensor must be [C,H,W], got {arr.shape}")
+    if arr.shape[0] < len(order):
+        raise ValueError(f"AIFS .pt tensor has {arr.shape[0]} channels, expected at least {len(order)}")
+    return np.asarray(arr[order.index(key)], dtype=np.float32)
 
 
 def crop_aifs_global(values: np.ndarray, domain: DomainConfig) -> np.ndarray:
@@ -119,13 +184,18 @@ def read_aifs_channels(
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Read a configured AIFS field as ``[C,H,W]`` float32."""
 
-    _ = aifs_config
+    aifs_config = aifs_config or {}
+    tensor_order = aifs_config.get("tensor_channel_order", DEFAULT_TENSOR_CHANNEL_ORDER)
     arrays: dict[str, np.ndarray] = {}
 
     def read_crop(name: str) -> np.ndarray:
         arr = arrays.get(name)
         if arr is None:
-            arr = crop_aifs_global(read_aifs_variable(path, name), domain)
+            if Path(path).suffix.lower() == ".pt":
+                raw = read_aifs_pt_variable(path, name, tensor_channel_order=tensor_order)
+            else:
+                raw = read_aifs_variable(path, name)
+            arr = crop_aifs_global(raw, domain)
             arrays[name] = arr
         return arr
 

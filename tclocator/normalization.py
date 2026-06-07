@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 
@@ -75,6 +75,60 @@ def compute_norm_stats(
     return stats
 
 
+def compute_norm_stats_stream(
+    sample_iter_factory: Callable[[], Iterable[np.ndarray]],
+    channels: Sequence[str],
+    norm_config: Mapping[str, Any],
+    *,
+    eps: float = 1e-6,
+) -> dict[str, Any]:
+    """Compute per-channel stats from a re-iterable sample source.
+
+    This avoids materializing thousands of meteorological fields in memory.
+    The factory is called once for log-shift discovery and once for moments.
+    """
+
+    methods = {channel: channel_method(channel, norm_config) for channel in channels}
+    shifts = {channel: 0.0 for channel in channels}
+    if any(method == "log1p+zscore" for method in methods.values()):
+        seen = False
+        mins = {channel: np.inf for channel in channels}
+        for sample in sample_iter_factory():
+            seen = True
+            for ci, channel in enumerate(channels):
+                if methods[channel] == "log1p+zscore":
+                    mins[channel] = min(mins[channel], float(np.nanmin(sample[ci])))
+        if not seen:
+            raise ValueError("Cannot compute normalization stats from zero samples")
+        shifts = {channel: max(0.0, -mins[channel]) if methods[channel] == "log1p+zscore" else 0.0 for channel in channels}
+
+    totals = {channel: 0 for channel in channels}
+    sums = {channel: 0.0 for channel in channels}
+    sum_sqs = {channel: 0.0 for channel in channels}
+    seen = False
+    for sample in sample_iter_factory():
+        seen = True
+        for ci, channel in enumerate(channels):
+            values = _transform(sample[ci], methods[channel], shifts[channel])
+            totals[channel] += values.size
+            sums[channel] += float(np.nansum(values))
+            sum_sqs[channel] += float(np.nansum(values * values))
+    if not seen:
+        raise ValueError("Cannot compute normalization stats from zero samples")
+
+    stats: dict[str, Any] = {"channels": list(channels), "stats": {}}
+    for channel in channels:
+        mean = sums[channel] / max(totals[channel], 1)
+        var = max(sum_sqs[channel] / max(totals[channel], 1) - mean * mean, 0.0)
+        stats["stats"][channel] = {
+            "method": methods[channel],
+            "mean": mean,
+            "std": max(float(np.sqrt(var)), eps),
+            "shift": shifts[channel],
+        }
+    return stats
+
+
 def apply_norm(sample: np.ndarray, stats: Mapping[str, Any]) -> np.ndarray:
     """Apply stored per-channel normalization to a ``[C,H,W]`` sample."""
 
@@ -109,4 +163,3 @@ def collect_samples(reader: Iterable[np.ndarray]) -> list[np.ndarray]:
     """Materialize reader output as float32 samples for stats computation."""
 
     return [np.asarray(sample, dtype=np.float32) for sample in reader]
-

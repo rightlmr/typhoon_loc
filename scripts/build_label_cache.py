@@ -77,7 +77,7 @@ def _build_aifs(config: dict[str, Any]) -> None:
     """Build AIFS label caches."""
 
     paths = config.get("paths", {})
-    files = iter_files(paths.get("aifs_dir", ""), [".grib2", ".grb2", ".grib"])
+    files = iter_files(paths.get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"])
     ibtracs_path = Path(paths.get("ibtracs_csv", ""))
     if not files or not ibtracs_path.exists():
         print("No AIFS/IBTrACS data found; skipping AIFS label cache.")

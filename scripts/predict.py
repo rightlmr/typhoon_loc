@@ -88,7 +88,7 @@ def main() -> int:
     elif args.domain == "aifs":
         norm_path = Path(config.get("paths", {}).get("norm_stats_aifs", ""))
         norm_stats = load_norm_stats(norm_path) if norm_path.exists() else None
-        files = iter_files(config.get("paths", {}).get("aifs_dir", ""), [".grib2", ".grb2", ".grib"])
+        files = iter_files(config.get("paths", {}).get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"])
         domain_cfg = DomainConfig.from_mapping(config.get("domain"))
         for path in files:
             field, meta = read_aifs_channels(path, channels=config["channels"], domain=domain_cfg, aifs_config=config.get("aifs", {}))

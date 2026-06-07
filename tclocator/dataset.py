@@ -34,7 +34,7 @@ class FieldSample:
 def parse_era5_valid_time_from_name(path: str | Path) -> pd.Timestamp | None:
     """Best-effort parse of YYYYMMDDHH-style ERA5 file names."""
 
-    match = re.search(r"(\d{10}|\d{8}T\d{2}|\d{8}_\d{2})", Path(path).stem)
+    match = re.search(r"(\d{10}|\d{8}T\d{2}|\d{8}_\d{2}|\d{4}_\d{2}_\d{2}_\d{2})", Path(path).stem)
     if not match:
         return None
     raw = match.group(1).replace("T", "").replace("_", "")

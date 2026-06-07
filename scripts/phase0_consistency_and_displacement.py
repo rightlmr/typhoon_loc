@@ -49,7 +49,15 @@ def _vo_consistency(config: dict[str, Any]) -> dict[str, Any]:
     derived_cfg = dict(era5_cfg)
     derived_cfg["vo850_from_uv"] = True
     direct, _ = read_era5_channels(era5_files[0], channels=["vo_850"], domain=domain, era5_config=direct_cfg)
-    derived, _ = read_era5_channels(era5_files[0], channels=["vo_850"], domain=domain, era5_config=derived_cfg)
+    try:
+        derived, _ = read_era5_channels(era5_files[0], channels=["vo_850"], domain=domain, era5_config=derived_cfg)
+    except Exception as exc:
+        return {
+            "status": "precomputed_vo850_without_uv",
+            "message": "ERA5 只有预计算 vo_850，缺少 u850/v850，无法自动验证 D5 口径一致性",
+            "error": f"{type(exc).__name__}: {exc}",
+            "pass": False,
+        }
     a = direct[0].ravel()
     b = derived[0].ravel()
     corr = float(np.corrcoef(a, b)[0, 1])
@@ -91,7 +99,7 @@ def _real_displacements(config: dict[str, Any]) -> pd.DataFrame:
     """Collect true-vs-field msl-min displacements from AIFS files."""
 
     paths = config.get("paths", {})
-    aifs_files = iter_files(paths.get("aifs_dir", ""), [".grib2", ".grb2", ".grib"])
+    aifs_files = iter_files(paths.get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"])
     ibtracs_path = Path(paths.get("ibtracs_csv", ""))
     if not aifs_files or not ibtracs_path.exists():
         return pd.DataFrame()
