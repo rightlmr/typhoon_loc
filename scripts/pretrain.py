@@ -34,11 +34,19 @@ def _phase0_gate(config: dict[str, Any]) -> bool:
 
 
 def _center_mae_km(model: torch.nn.Module, loader: DataLoader, device: str, config: dict[str, Any]) -> float:
-    """Decode validation predictions and compare with positive label centers."""
+    """Decode validation predictions and match them to positive label centers.
+
+    A field can contain multiple active cyclones. Validation therefore cannot
+    compare the highest-confidence prediction with the first mask pixel only;
+    doing so turns a correct detection of a different cyclone into a false
+    multi-thousand-kilometer error. This metric greedily matches decoded peaks
+    to all label centers inside the configured decode latitude range.
+    """
 
     from tclocator.common import DomainConfig, grid_to_latlon, haversine_km
 
     domain = DomainConfig.from_mapping(config.get("domain"))
+    lat_filter = tuple(config.get("decode", {}).get("lat_filter", [0.0, 40.0]))
     model.eval()
     errors: list[float] = []
     with torch.no_grad():
@@ -46,21 +54,41 @@ def _center_mae_km(model: torch.nn.Module, loader: DataLoader, device: str, conf
             inputs = batch["input"].to(device)
             outputs = model(inputs)
             for i in range(inputs.shape[0]):
+                ys, xs = torch.where(batch["mask"][i] > 0.5)
+                refs: list[tuple[float, float]] = []
+                for y_idx, x_idx in zip(ys.tolist(), xs.tolist(), strict=True):
+                    y = float(y_idx) + float(batch["offset"][i, 0, y_idx, x_idx])
+                    x = float(x_idx) + float(batch["offset"][i, 1, y_idx, x_idx])
+                    lat_ref, lon_ref = grid_to_latlon(y, x, domain)
+                    if lat_filter[0] <= float(lat_ref) <= lat_filter[1]:
+                        refs.append((float(lat_ref), float(lon_ref)))
+                if not refs:
+                    continue
+
                 decoded = decode_heatmap(
                     outputs["heatmap"][i, 0],
                     outputs["offset"][i],
                     domain,
-                    conf_thresh=0.05,
-                    lat_filter=tuple(config.get("decode", {}).get("lat_filter", [0.0, 40.0])),
-                    topk=1,
+                    conf_thresh=0.01,
+                    lat_filter=lat_filter,
+                    topk=max(20, len(refs) * 5),
                 )
-                ys, xs = torch.where(batch["mask"][i] > 0.5)
-                if decoded.empty or len(ys) == 0:
+                if decoded.empty:
                     continue
-                y = float(ys[0]) + float(batch["offset"][i, 0, ys[0], xs[0]])
-                x = float(xs[0]) + float(batch["offset"][i, 1, ys[0], xs[0]])
-                lat_ref, lon_ref = grid_to_latlon(y, x, domain)
-                errors.append(float(haversine_km(decoded.iloc[0]["LAT"], decoded.iloc[0]["LON"], lat_ref, lon_ref)))
+
+                remaining = set(range(len(decoded)))
+                for lat_ref, lon_ref in refs:
+                    best_idx: int | None = None
+                    best_dist = float("inf")
+                    for pred_idx in list(remaining):
+                        row = decoded.iloc[pred_idx]
+                        dist = float(haversine_km(float(row["LAT"]), float(row["LON"]), lat_ref, lon_ref))
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_idx = pred_idx
+                    if best_idx is not None:
+                        remaining.remove(best_idx)
+                        errors.append(best_dist)
     return float(sum(errors) / max(len(errors), 1)) if errors else float("inf")
 
 
