@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -13,13 +14,14 @@ if str(ROOT) not in sys.path:
 
 from tclocator import _pygrib as _pygrib  # noqa: F401
 import torch
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
 
 from tclocator.common import PHASE0_REQUIRED_MESSAGE, iter_files, load_config, resolve_device, set_seed
-from tclocator.dataset import FieldDataset, SyntheticTCDataset, build_aifs_samples, collate_batch
+from tclocator.dataset import FieldDataset, FieldSample, SyntheticTCDataset, build_aifs_samples, collate_batch
 from tclocator.losses import LossConfig, TCLocatorLoss
 from tclocator.model import build_model_from_config
 from tclocator.normalization import load_norm_stats
+from tclocator.split import grouped_split, split_config
 from scripts.pretrain import _center_mae_km
 
 
@@ -85,7 +87,7 @@ def _train(model: torch.nn.Module, train_loader: DataLoader, val_loader: DataLoa
     return best_payload or model.checkpoint_payload(config)
 
 
-def _real_dataset(config: dict[str, Any]) -> FieldDataset | None:
+def _real_dataset(config: dict[str, Any]) -> tuple[FieldDataset, list[FieldSample]] | None:
     """Build real AIFS fine-tuning dataset."""
 
     files = iter_files(config.get("paths", {}).get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"])
@@ -99,7 +101,27 @@ def _real_dataset(config: dict[str, Any]) -> FieldDataset | None:
         return None
     norm_path = Path(config.get("paths", {}).get("norm_stats_aifs", ""))
     norm_stats = load_norm_stats(norm_path) if norm_path.exists() else None
-    return FieldDataset(samples=samples, config=config, norm_stats=norm_stats, ibtracs_records=None)
+    dataset = FieldDataset(samples=samples, config=config, norm_stats=norm_stats, ibtracs_records=None)
+    return dataset, samples
+
+
+def _smoke_split(dataset: SyntheticTCDataset) -> tuple[Subset, Subset]:
+    """Return a deterministic split for synthetic smoke tests."""
+
+    val_size = max(1, len(dataset) // 4)
+    train_size = max(1, len(dataset) - val_size)
+    train_idx = list(range(train_size))
+    val_idx = list(range(train_size, train_size + val_size))
+    return Subset(dataset, train_idx), Subset(dataset, val_idx)
+
+
+def _write_aifs_split_record(config: dict[str, Any], group_by: str, val_fraction: float, seed: int, val_groups: list[str]) -> None:
+    """Write the deterministic AIFS validation groups for transparency."""
+
+    out_dir = Path(config.get("paths", {}).get("output_dir", ROOT / "outputs"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"group_by": group_by, "val_fraction": val_fraction, "seed": seed, "val_groups": val_groups}
+    (out_dir / "split_aifs.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def main() -> int:
@@ -122,14 +144,22 @@ def main() -> int:
 
     if args.smoke_synthetic:
         dataset = SyntheticTCDataset(length=4, channels=config["channels"], seed=int(config.get("seed", 42)))
+        train_ds, val_ds = _smoke_split(dataset)
     else:
-        dataset = _real_dataset(config)
-        if dataset is None:
+        real = _real_dataset(config)
+        if real is None:
             return 0
+        dataset, samples = real
+        group_by, val_fraction, split_seed = split_config(config, "init_time")
+        train_idx, val_idx, val_groups = grouped_split(samples, group_by=group_by, val_fraction=val_fraction, seed=split_seed)
+        _write_aifs_split_record(config, group_by, val_fraction, split_seed, val_groups)
+        if not train_idx or not val_idx:
+            print(f"Invalid AIFS split: train n={len(train_idx)} val n={len(val_idx)} val_groups={val_groups}")
+            return 1
+        print(f"AIFS split group_by={group_by} train n={len(train_idx)} val n={len(val_idx)} val_groups={val_groups}")
+        train_ds = Subset(dataset, train_idx)
+        val_ds = Subset(dataset, val_idx)
 
-    val_size = max(1, len(dataset) // 4)
-    train_size = max(1, len(dataset) - val_size)
-    train_ds, val_ds = random_split(dataset, [train_size, val_size], generator=torch.Generator().manual_seed(int(config.get("seed", 42))))
     loader_cfg = config.get("train", {})
     train_loader = DataLoader(train_ds, batch_size=int(loader_cfg.get("batch_size", 1)), shuffle=True, collate_fn=collate_batch)
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, collate_fn=collate_batch)

@@ -13,15 +13,16 @@ if str(ROOT) not in sys.path:
 
 from tclocator import _pygrib as _pygrib  # noqa: F401
 import torch
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
 
 from tclocator.common import PHASE0_REQUIRED_MESSAGE, iter_files, load_config, resolve_device, set_seed
-from tclocator.dataset import FieldDataset, SyntheticTCDataset, build_era5_samples, collate_batch
+from tclocator.dataset import FieldDataset, FieldSample, SyntheticTCDataset, build_era5_samples, collate_batch
 from tclocator.decode import decode_heatmap
 from tclocator.labels import read_ibtracs
 from tclocator.losses import LossConfig, TCLocatorLoss
 from tclocator.model import build_model_from_config
 from tclocator.normalization import load_norm_stats
+from tclocator.split import grouped_split, split_config
 
 
 def _phase0_gate(config: dict[str, Any]) -> bool:
@@ -133,7 +134,7 @@ def _train(model: torch.nn.Module, train_loader: DataLoader, val_loader: DataLoa
     return best_payload or model.checkpoint_payload(config)
 
 
-def _real_dataset(config: dict[str, Any]) -> FieldDataset | None:
+def _real_dataset(config: dict[str, Any]) -> tuple[FieldDataset, list[FieldSample]] | None:
     """Build the real ERA5 dataset when data exists."""
 
     files = iter_files(config.get("paths", {}).get("era5_dir", ""), [".nc"])
@@ -145,7 +146,18 @@ def _real_dataset(config: dict[str, Any]) -> FieldDataset | None:
     ib_path = Path(config.get("paths", {}).get("ibtracs_csv", ""))
     records = read_ibtracs(ib_path, config.get("ibtracs", {}).get("col_map", {})) if ib_path.exists() else None
     samples = build_era5_samples(files, config=config)
-    return FieldDataset(samples=samples, config=config, norm_stats=norm_stats, ibtracs_records=records)
+    dataset = FieldDataset(samples=samples, config=config, norm_stats=norm_stats, ibtracs_records=records)
+    return dataset, samples
+
+
+def _smoke_split(dataset: SyntheticTCDataset) -> tuple[Subset, Subset]:
+    """Return a deterministic split for synthetic smoke tests."""
+
+    val_size = max(1, len(dataset) // 4)
+    train_size = max(1, len(dataset) - val_size)
+    train_idx = list(range(train_size))
+    val_idx = list(range(train_size, train_size + val_size))
+    return Subset(dataset, train_idx), Subset(dataset, val_idx)
 
 
 def main() -> int:
@@ -165,13 +177,23 @@ def main() -> int:
 
     if args.smoke_synthetic:
         dataset = SyntheticTCDataset(length=4, channels=config["channels"], seed=int(config.get("seed", 42)))
+        train_ds, val_ds = _smoke_split(dataset)
     else:
-        dataset = _real_dataset(config)
-        if dataset is None:
+        real = _real_dataset(config)
+        if real is None:
             return 0
-    val_size = max(1, len(dataset) // 4)
-    train_size = max(1, len(dataset) - val_size)
-    train_ds, val_ds = random_split(dataset, [train_size, val_size], generator=torch.Generator().manual_seed(int(config.get("seed", 42))))
+        dataset, samples = real
+        missing_time = sum(sample.valid_time is None for sample in samples)
+        if missing_time:
+            print(f"Warning: {missing_time}/{len(samples)} ERA5 samples have no valid_time and will stay in train.")
+        group_by, val_fraction, split_seed = split_config(config, "year_month")
+        train_idx, val_idx, val_groups = grouped_split(samples, group_by=group_by, val_fraction=val_fraction, seed=split_seed)
+        if not train_idx or not val_idx:
+            print(f"Invalid ERA5 split: train n={len(train_idx)} val n={len(val_idx)} val_groups={val_groups}")
+            return 1
+        print(f"ERA5 split group_by={group_by} train n={len(train_idx)} val n={len(val_idx)} val_groups={val_groups}")
+        train_ds = Subset(dataset, train_idx)
+        val_ds = Subset(dataset, val_idx)
     loader_cfg = config.get("train", {})
     train_loader = DataLoader(train_ds, batch_size=int(loader_cfg.get("batch_size", 2)), shuffle=True, collate_fn=collate_batch)
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, collate_fn=collate_batch)

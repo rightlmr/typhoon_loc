@@ -2,7 +2,7 @@
 
 Last updated: 2026-06-08 Asia/Shanghai
 
-Latest update after Claude `FIX_FIELD_CENTER.md`: Step 0 field-center repair was implemented and validated on the local real AIFS/IBTrACS data. Because `.gitignore` intentionally excludes `outputs/`, `*.ckpt`, and `*.npz`, the real-data CSV artifacts are not visible on GitHub. The exact local validation outputs are summarized in Section 14 of this document.
+Latest update after Claude `STEP1_SPLIT_RETRAIN.md`: Step 1 leakage-free grouped split was implemented, pretraining/fine-tuning were rerun on repaired labels, and val-only AIFS evaluation was completed. The result did not pass: validation `end2end_median_km` remains far above the Step 0 baseline, and cap-hit diagnostics show `cap_fraction=0.814`. Because `.gitignore` intentionally excludes `outputs/`, `*.ckpt`, and `*.npz`, the local real-data artifacts are summarized in Sections 14 and 15.
 
 This document summarizes the work completed after the initial code generation of the typhoon localization project, the data/environment adaptations, the training/evaluation history, the bugs found, and the current usable state.
 
@@ -667,3 +667,290 @@ The Step 0 repair was committed and pushed:
 ```
 
 This commit is on `origin/main` at `https://github.com/rightlmr/typhoon_loc.git`.
+
+## 15. Step 1 Leakage-Free Split And Retrain Results
+
+This section records the real-data results from `D:\downloads\STEP1_SPLIT_RETRAIN.md`. Local outputs are under `F:\typhoon_loc\outputs`, but checkpoints/CSV/NPZ outputs are ignored by Git.
+
+### 15.1 Code Changes
+
+Implemented within the scope of the Step 1 plan:
+
+- Added `tclocator/split.py` with `grouped_split`, `sample_group_id`, `split_config`, and `select_aifs_files`.
+- Replaced real-data `random_split` in `scripts/pretrain.py` and `scripts/finetune.py`.
+- AIFS fine-tune now groups by init cycle and writes `outputs/split_aifs.json`.
+- `scripts/predict.py` and `scripts/evaluate.py` now accept `--split {all,train,val}`.
+- Split-specific outputs use suffixes such as `predictions_val.csv`, `metrics_by_lead_val.csv`, and `precision_recall_val.csv`.
+- `tclocator/labels.py::find_field_min_center` gained optional `return_stop_reason`; default return type and descent behavior are unchanged.
+- `scripts/check_field_center.py` now reports `local_min`/`cap` stop counts and median distances by stop reason.
+- Added `tests/test_split.py` for group-aware split behavior.
+- Added config split sections:
+
+```yaml
+# configs/pretrain.yaml
+split: {group_by: "year_month", val_fraction: 0.2, seed: 42}
+
+# configs/finetune.yaml / configs/infer.yaml
+split: {group_by: "init_time", val_fraction: 0.2, seed: 42}
+```
+
+No model, loss, decode, local descent algorithm, 100 km cap, or D1-D6 design decisions were changed.
+
+### 15.2 Validation Before Retraining
+
+Command:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\check_field_center.py --config configs\finetune.yaml --max-samples 10000
+```
+
+Result:
+
+```text
+old_global_argmin: median_dist_to_truth=492.75 km (n=512)
+new_local_descent: median_dist_to_truth=78.60 km (n=512)
+stop_reason: local_min=95 cap=417 cap_fraction=0.814
+median_dist local_min=50.00 km cap=80.55 km
+PASS
+```
+
+Interpretation:
+
+- The Step 0 field-center repair still passes.
+- `cap_fraction=0.814` is well above the Step 1 warning threshold of roughly 0.40.
+- Most short-lead AIFS cases do not naturally descend into a local MSL minimum near the storm; the center is being limited by the 100 km cap.
+- This strongly suggests msl-only field centers are too noisy for a large fraction of AIFS samples.
+
+### 15.3 Backup Before Retraining
+
+Before overwriting the current M4 outputs, these files were backed up to:
+
+```text
+outputs/m4_step0_labels_baseline/
+```
+
+Backed up files:
+
+```text
+finetune_best.ckpt
+predictions.csv
+metrics_by_lead.csv
+precision_recall.csv
+matched_metrics.csv
+```
+
+### 15.4 ERA5 Pretraining Was Redone
+
+Command:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\pretrain.py --config configs\pretrain.yaml
+```
+
+Split:
+
+```text
+ERA5 split group_by=year_month train n=3198 val n=550
+val_groups=['2021-02', '2021-04', '2021-06', '2022-05', '2022-07', '2022-08', '2023-01', '2023-04', '2023-12']
+```
+
+Training summary:
+
+```text
+epoch=1 train_loss=1.6508 val_center_mae_km=54.37
+epoch=2 train_loss=1.0269 val_center_mae_km=61.73
+epoch=3 train_loss=0.9614 val_center_mae_km=49.49
+epoch=4 train_loss=0.9033 val_center_mae_km=39.32
+epoch=5 train_loss=0.8709 val_center_mae_km=40.52
+epoch=6 train_loss=0.8180 val_center_mae_km=42.99
+epoch=7 train_loss=0.7758 val_center_mae_km=47.98
+epoch=8 train_loss=0.7408 val_center_mae_km=37.15
+epoch=9 train_loss=0.6982 val_center_mae_km=35.76
+epoch=10 train_loss=0.6676 val_center_mae_km=43.61
+epoch=11 train_loss=0.6277 val_center_mae_km=40.62
+epoch=12 train_loss=0.6006 val_center_mae_km=43.29
+epoch=13 train_loss=0.5608 val_center_mae_km=45.64
+epoch=14 train_loss=0.5189 val_center_mae_km=46.00
+epoch=15 train_loss=0.4772 val_center_mae_km=57.49
+Wrote F:\typhoon_loc\outputs\pretrain_best.ckpt
+```
+
+### 15.5 AIFS Fine-Tuning Was Redone
+
+Command:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\finetune.py --config configs\finetune.yaml
+```
+
+Split:
+
+```text
+AIFS split group_by=init_time train n=120 val n=30
+val_groups=[
+  '2024-09-07T12:00:00+00:00',
+  '2024-09-11T12:00:00+00:00',
+  '2024-09-15T12:00:00+00:00',
+  '2024-09-20T12:00:00+00:00',
+  '2024-09-23T12:00:00+00:00',
+  '2024-09-27T12:00:00+00:00'
+]
+```
+
+Training summary:
+
+```text
+Loaded F:\typhoon_loc\outputs\pretrain_best.ckpt
+epoch=1 train_loss=6.3908 val_center_mae_km=1109.58
+epoch=2 train_loss=4.1824 val_center_mae_km=1118.16
+epoch=3 train_loss=4.0845 val_center_mae_km=1060.12
+epoch=4 train_loss=4.0344 val_center_mae_km=1053.93
+epoch=5 train_loss=3.9908 val_center_mae_km=1111.98
+epoch=6 train_loss=3.9466 val_center_mae_km=1115.98
+epoch=7 train_loss=3.8894 val_center_mae_km=1215.18
+epoch=8 train_loss=3.8190 val_center_mae_km=1734.24
+epoch=9 train_loss=3.7343 val_center_mae_km=1541.69
+epoch=10 train_loss=3.6353 val_center_mae_km=1382.82
+epoch=11 train_loss=3.5212 val_center_mae_km=1778.44
+epoch=12 train_loss=3.3868 val_center_mae_km=2139.03
+Wrote F:\typhoon_loc\outputs\finetune_best.ckpt
+```
+
+`outputs/split_aifs.json`:
+
+```json
+{
+  "group_by": "init_time",
+  "val_fraction": 0.2,
+  "seed": 42,
+  "val_groups": [
+    "2024-09-07T12:00:00+00:00",
+    "2024-09-11T12:00:00+00:00",
+    "2024-09-15T12:00:00+00:00",
+    "2024-09-20T12:00:00+00:00",
+    "2024-09-23T12:00:00+00:00",
+    "2024-09-27T12:00:00+00:00"
+  ]
+}
+```
+
+### 15.6 Validation-Only Inference And Evaluation
+
+Commands:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\predict.py --config configs\infer.yaml --domain aifs --split val
+D:\study\envs\tc_loc\python.exe scripts\evaluate.py --config configs\infer.yaml --split val --predictions outputs\predictions_val.csv
+```
+
+`outputs/metrics_by_lead_val.csv`:
+
+```text
+lead_bin,n_ref,recall,loc_error_median_km,track_bias_median_km,end2end_median_km
+000-024,94,0.0,1755.3500766750099,78.84959033456511,1815.8273747083335
+024-048,95,0.042105263157894736,1631.659272180731,78.08268421981114,1586.5963826514298
+048-096,170,0.058823529411764705,1481.0569102551867,79.99228037091818,1467.3963206666026
+096-120,108,0.0,2599.838775788575,80.5194569437135,2560.9332803664947
+```
+
+`outputs/precision_recall_val.csv`:
+
+```text
+conf_thresh,precision,recall
+0.1,0.012658227848101266,0.018008474576271187
+0.2,0.05405405405405406,0.00211864406779661
+0.3,0.0,0.0
+0.5,0.0,0.0
+0.7,0.0,0.0
+```
+
+Step 1 judgment:
+
+- This does not pass.
+- The Step 0 full-data old-model baseline was `end2end@000-024 ~= 462 km`.
+- After leakage-free retraining, val `end2end@000-024 = 1815.83 km`, much worse than baseline and far from the expected 100-200 km range.
+- `track_bias_median_km` remains about 79-80 km, so the repaired reference center definition is stable; the failure is in model prediction or target learnability, not the evaluation reference.
+
+### 15.7 Extra Diagnostic: Train Split Is Also Poor
+
+To distinguish pure validation generalization failure from training/target failure, train split inference/evaluation was also run.
+
+Commands:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\predict.py --config configs\infer.yaml --domain aifs --split train
+D:\study\envs\tc_loc\python.exe scripts\evaluate.py --config configs\infer.yaml --split train --predictions outputs\predictions_train.csv
+```
+
+`outputs/metrics_by_lead_train.csv`:
+
+```text
+lead_bin,n_ref,recall,loc_error_median_km,track_bias_median_km,end2end_median_km
+000-024,315,0.12380952380952381,1253.0195461559304,78.61268551847417,1262.0765157221506
+024-048,318,0.08490566037735849,1475.6512958546623,79.82811224426311,1453.816591727207
+048-096,662,0.04229607250755287,1984.1977937624997,79.40518904019766,1967.2702155044826
+096-120,310,0.025806451612903226,2266.082974826154,78.81074084346363,2226.18622456266
+```
+
+`outputs/precision_recall_train.csv`:
+
+```text
+conf_thresh,precision,recall
+0.1,0.019419237749546278,0.03164744158532978
+0.2,0.03508771929824561,0.0011830819284235432
+0.3,0.0,0.0
+0.5,0.0,0.0
+0.7,0.0,0.0
+```
+
+Interpretation:
+
+- Train split is also poor, including the 0-24h leads used for AIFS fine-tuning.
+- Therefore this is not only a no-leakage validation generalization issue.
+- AIFS labels are present: short-lead train/val label caches all have positive masks.
+- AIFS normalization stats look reasonable and close to ERA5 stats.
+- Current strongest evidence points to the msl-only field-center target being too noisy/ambiguous for AIFS: 81.4% of short-lead samples are cap-limited instead of true local-MSL-min stops.
+
+### 15.8 Verification Notes
+
+Commands/checks completed:
+
+```powershell
+D:\study\envs\tc_loc\python.exe -m compileall tclocator scripts tests
+D:\study\envs\tc_loc\python.exe -c "import runpy; ns=runpy.run_path('tests/test_split.py'); ns['test_grouped_split_keeps_all_leads_of_init_together'](); ns['test_select_aifs_files_uses_same_deterministic_split'](); print('split tests ok')"
+D:\study\envs\tc_loc\python.exe scripts\predict.py --config configs\infer.yaml --domain aifs --split val --smoke-synthetic
+D:\study\envs\tc_loc\python.exe scripts\evaluate.py --config configs\infer.yaml --split val --smoke-synthetic
+```
+
+Results:
+
+```text
+compileall: passed
+split tests: passed
+predict/evaluate smoke: passed
+```
+
+Full `pytest` was not run in `tc_loc` because that environment currently lacks pytest even though `requirements.txt` declares it:
+
+```text
+D:\study\envs\tc_loc\python.exe: No module named pytest
+```
+
+System Python has pytest but lacks torch, so it is not a valid full test environment for this project.
+
+### 15.9 Recommended Next Step
+
+Do not keep tuning hyperparameters on the current msl-only label definition.
+
+Recommended next implementation step:
+
+1. Add the diagnostic requested in Step 1: inspect 3-5 validation storms with true center, field center, model prediction, local MSL patch, and `vo_850` patch.
+2. Then implement a field-center fallback that uses msl local descent when it reaches a local minimum, but uses `vo_850` maximum near the storm when msl descent hits the cap.
+3. Rebuild label cache, retrain, and re-evaluate with the same leakage-free split.
+
+Reason:
+
+- The pipeline has labels and normalized inputs.
+- Pretraining still works on ERA5.
+- AIFS fine-tuning fails on train and val.
+- `cap_fraction=0.814` shows the present msl-only target is often not a real local-pressure center.

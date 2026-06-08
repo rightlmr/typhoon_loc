@@ -18,6 +18,7 @@ import pandas as pd
 from tclocator.common import DomainConfig, iter_files, load_config
 from tclocator.labels import find_field_min_center, read_ibtracs, records_at_time
 from tclocator.metrics import match_predictions, precision_recall_curve, summarize_by_lead
+from tclocator.split import select_aifs_files
 
 
 def _synthetic_refs() -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -40,11 +41,12 @@ def _synthetic_refs() -> tuple[pd.DataFrame, pd.DataFrame]:
     return preds, refs
 
 
-def _build_references(config: dict[str, Any]) -> pd.DataFrame:
+def _build_references(config: dict[str, Any], split: str) -> pd.DataFrame:
     """Build AIFS references with true and field centers."""
 
     paths = config.get("paths", {})
     files = iter_files(paths.get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"])
+    files = select_aifs_files(config, files, split)
     ib_path = Path(paths.get("ibtracs_csv", ""))
     if not files or not ib_path.exists():
         return pd.DataFrame()
@@ -81,12 +83,21 @@ def _build_references(config: dict[str, Any]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _with_split_suffix(path: Path, split: str) -> Path:
+    """Return an output path with a split suffix when requested."""
+
+    if split == "all":
+        return path
+    return path.with_name(f"{path.stem}_{split}{path.suffix}")
+
+
 def main() -> int:
     """CLI entry point."""
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=str(ROOT / "configs" / "infer.yaml"))
     parser.add_argument("--predictions", default=None)
+    parser.add_argument("--split", choices=["all", "train", "val"], default="all")
     parser.add_argument("--smoke-synthetic", action="store_true")
     args = parser.parse_args()
 
@@ -99,7 +110,7 @@ def main() -> int:
             print(f"Predictions file not found: {pred_path}")
             return 1
         predictions = pd.read_csv(pred_path)
-        references = _build_references(config)
+        references = _build_references(config, args.split)
         if references.empty:
             print("No AIFS/IBTrACS references found; evaluation skipped.")
             return 0
@@ -109,9 +120,9 @@ def main() -> int:
     pr = precision_recall_curve(predictions, references, thresholds=[0.1, 0.2, 0.3, 0.5, 0.7])
     out_dir = Path(config.get("paths", {}).get("output_dir", ROOT / "outputs"))
     out_dir.mkdir(parents=True, exist_ok=True)
-    matched_path = out_dir / "matched_metrics.csv"
-    summary_path = out_dir / "metrics_by_lead.csv"
-    pr_path = out_dir / "precision_recall.csv"
+    matched_path = _with_split_suffix(out_dir / "matched_metrics.csv", args.split)
+    summary_path = _with_split_suffix(out_dir / "metrics_by_lead.csv", args.split)
+    pr_path = _with_split_suffix(out_dir / "precision_recall.csv", args.split)
     matched.to_csv(matched_path, index=False)
     summary.to_csv(summary_path, index=False)
     pr.to_csv(pr_path, index=False)

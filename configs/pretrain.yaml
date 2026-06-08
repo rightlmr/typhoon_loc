@@ -22,6 +22,7 @@ labels:
   search_radius_km: 100
   sigma_px: 3
   field_center_smooth_px: 0
+split: {group_by: "year_month", val_fraction: 0.2, seed: 42}
 decode:
   conf_thresh: 0.3
   lat_filter: [0.0, 40.0]

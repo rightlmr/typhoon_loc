@@ -22,6 +22,7 @@ from tclocator.decode import decode_heatmap
 from tclocator.io_era5 import read_era5_channels
 from tclocator.model import build_model_from_config
 from tclocator.normalization import apply_norm, load_norm_stats
+from tclocator.split import select_aifs_files
 
 
 def _load_model(config: dict[str, Any], device: str, checkpoint: Path | None) -> torch.nn.Module:
@@ -64,12 +65,21 @@ def _predict_array(
     )
 
 
+def _with_split_suffix(path: Path, split: str) -> Path:
+    """Return an output path with a split suffix when requested."""
+
+    if split == "all":
+        return path
+    return path.with_name(f"{path.stem}_{split}{path.suffix}")
+
+
 def main() -> int:
     """CLI entry point."""
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=str(ROOT / "configs" / "infer.yaml"))
     parser.add_argument("--domain", choices=["aifs", "era5"], default="aifs")
+    parser.add_argument("--split", choices=["all", "train", "val"], default="all")
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--smoke-synthetic", action="store_true")
     args = parser.parse_args()
@@ -89,6 +99,7 @@ def main() -> int:
         norm_path = Path(config.get("paths", {}).get("norm_stats_aifs", ""))
         norm_stats = load_norm_stats(norm_path) if norm_path.exists() else None
         files = iter_files(config.get("paths", {}).get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"])
+        files = select_aifs_files(config, files, args.split)
         domain_cfg = DomainConfig.from_mapping(config.get("domain"))
         for path in files:
             field, meta = read_aifs_channels(path, channels=config["channels"], domain=domain_cfg, aifs_config=config.get("aifs", {}))
@@ -109,6 +120,7 @@ def main() -> int:
 
     out = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=["ISO_TIME", "LAT", "LON", "CONF"])
     out_path = Path(config.get("paths", {}).get("predictions_csv", ROOT / "outputs" / "predictions.csv"))
+    out_path = _with_split_suffix(out_path, args.split)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(out_path, index=False)
     print(f"Wrote {out_path}")

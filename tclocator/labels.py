@@ -65,7 +65,8 @@ def find_field_min_center(
     search_radius_km: float,
     *,
     smooth_px: int = 0,
-) -> tuple[float, float]:
+    return_stop_reason: bool = False,
+) -> tuple[float, float] | tuple[float, float, str]:
     """Find the local pressure-basin minimum containing the IBTrACS position.
 
     The previous implementation selected the global MSL minimum inside a large
@@ -85,6 +86,7 @@ def find_field_min_center(
     y_f, x_f = latlon_to_grid(true_lat, true_lon, domain, clip=True)
     y = int(np.clip(round(float(y_f)), 0, height - 1))
     x = int(np.clip(round(float(x_f)), 0, width - 1))
+    stop_reason = "local_min"
 
     while True:
         best_y, best_x = y, x
@@ -98,13 +100,17 @@ def find_field_min_center(
                     if value < best_val:
                         best_y, best_x, best_val = ny, nx, value
         if (best_y, best_x) == (y, x):
+            stop_reason = "local_min"
             break
         cand_lat, cand_lon = grid_to_latlon(best_y, best_x, domain)
         if float(haversine_km(cand_lat, cand_lon, true_lat, true_lon)) > search_radius_km:
+            stop_reason = "cap"
             break
         y, x = best_y, best_x
 
     lat, lon = grid_to_latlon(y, x, domain)
+    if return_stop_reason:
+        return float(lat), float(lon), stop_reason
     return float(lat), float(lon)
 
 

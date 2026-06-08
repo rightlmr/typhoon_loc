@@ -45,8 +45,8 @@ def _collect_distances(
     old_radius_km: float,
     *,
     new_radius_km: float | None = None,
-) -> tuple[list[float], list[float]]:
-    """Collect old/new distances to IBTrACS truth from short-lead AIFS fields."""
+) -> tuple[list[float], list[float], list[str]]:
+    """Collect old/new distances and descent stop reasons from short-lead AIFS fields."""
 
     paths = config.get("paths", {})
     domain = DomainConfig.from_mapping(config.get("domain"))
@@ -58,6 +58,7 @@ def _collect_distances(
     records = read_ibtracs(paths.get("ibtracs_csv", ""), config.get("ibtracs", {}).get("col_map", {}))
     old_distances: list[float] = []
     new_distances: list[float] = []
+    stop_reasons: list[str] = []
 
     for path in files:
         meta = parse_aifs_filename(path)
@@ -71,26 +72,28 @@ def _collect_distances(
             true_lat = float(record["LAT"])
             true_lon = float(record["LON"])
             old_lat, old_lon = _old_global_argmin_center(field[0], true_lat, true_lon, domain, old_radius_km)
-            new_lat, new_lon = find_field_min_center(
+            new_lat, new_lon, stop_reason = find_field_min_center(
                 field[0],
                 true_lat,
                 true_lon,
                 domain,
                 radius_km,
                 smooth_px=smooth_px,
+                return_stop_reason=True,
             )
             old_distances.append(float(haversine_km(true_lat, true_lon, old_lat, old_lon)))
             new_distances.append(float(haversine_km(true_lat, true_lon, new_lat, new_lon)))
+            stop_reasons.append(str(stop_reason))
             if len(new_distances) >= max_samples:
-                return old_distances, new_distances
-    return old_distances, new_distances
+                return old_distances, new_distances, stop_reasons
+    return old_distances, new_distances, stop_reasons
 
 
 def _scan_radii(config: dict[str, Any], max_samples: int, radii: list[float]) -> None:
     """Print median/p90 true-distance for several descent caps."""
 
     for radius in radii:
-        _, distances = _collect_distances(config, max_samples, old_radius_km=500.0, new_radius_km=radius)
+        _, distances, _ = _collect_distances(config, max_samples, old_radius_km=500.0, new_radius_km=radius)
         if not distances:
             print(f"radius={radius:g}: no samples")
             continue
@@ -115,7 +118,7 @@ def main() -> int:
         _scan_radii(config, args.max_samples, [50.0, 75.0, 100.0, 125.0, 150.0, 200.0, 250.0])
         return 0
 
-    old_distances, new_distances = _collect_distances(config, args.max_samples, args.old_radius_km)
+    old_distances, new_distances, stop_reasons = _collect_distances(config, args.max_samples, args.old_radius_km)
     if not new_distances:
         print("No matching short-lead AIFS/IBTrACS samples found.")
         return 1
@@ -123,8 +126,17 @@ def main() -> int:
     old_median = float(np.median(old_distances))
     new_median = float(np.median(new_distances))
     n = len(new_distances)
+    local_min_count = sum(reason == "local_min" for reason in stop_reasons)
+    cap_count = sum(reason == "cap" for reason in stop_reasons)
+    local_min_distances = [dist for dist, reason in zip(new_distances, stop_reasons, strict=True) if reason == "local_min"]
+    cap_distances = [dist for dist, reason in zip(new_distances, stop_reasons, strict=True) if reason == "cap"]
+    local_min_median = float(np.median(local_min_distances)) if local_min_distances else float("nan")
+    cap_median = float(np.median(cap_distances)) if cap_distances else float("nan")
+    cap_fraction = cap_count / max(local_min_count + cap_count, 1)
     print(f"old_global_argmin: median_dist_to_truth={old_median:.2f} km (n={n})")
     print(f"new_local_descent: median_dist_to_truth={new_median:.2f} km (n={n})")
+    print(f"stop_reason: local_min={local_min_count} cap={cap_count} cap_fraction={cap_fraction:.3f}")
+    print(f"median_dist local_min={local_min_median:.2f} km cap={cap_median:.2f} km")
     passed = new_median < 100.0 and new_median < old_median * 0.5
     print("PASS" if passed else "FAIL")
     return 0 if passed else 2
