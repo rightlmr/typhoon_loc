@@ -2,6 +2,8 @@
 
 Last updated: 2026-06-08 Asia/Shanghai
 
+Latest update after Claude `FIX_FIELD_CENTER.md`: Step 0 field-center repair was implemented and validated on the local real AIFS/IBTrACS data. Because `.gitignore` intentionally excludes `outputs/`, `*.ckpt`, and `*.npz`, the real-data CSV artifacts are not visible on GitHub. The exact local validation outputs are summarized in Section 14 of this document.
+
 This document summarizes the work completed after the initial code generation of the typhoon localization project, the data/environment adaptations, the training/evaluation history, the bugs found, and the current usable state.
 
 ## 1. Project Scope And Source Of Truth
@@ -482,3 +484,186 @@ outputs/diagnostics
 ```
 
 Do not use `outputs/m4_bad_baseline` as the current model. It exists only to preserve the failed first M4 run.
+
+## 14. Step 0 Field-Center Repair Results
+
+This section records the real-data results from the follow-up plan in `D:\downloads\FIX_FIELD_CENTER.md`. These results are local artifacts under `F:\typhoon_loc\outputs`, but the CSV/checkpoint/cache files are intentionally ignored by Git and are therefore not visible to Claude through GitHub.
+
+### 14.1 What Changed
+
+The root issue identified by Claude was that `find_field_min_center` used a large-disk global MSL argmin around the IBTrACS position. In multi-low scenes this snapped the reference/label center to unrelated deeper lows, which inflated `track_bias_median_km` to roughly 490 km and made the previous M4 metrics physically misleading.
+
+Implemented fix:
+
+- `tclocator/labels.py::find_field_min_center` now uses bounded local 8-neighbor pressure-basin descent from the nearest IBTrACS grid point.
+- The old global argmin path is not retained in production code.
+- Optional NumPy-only box smoothing was added as `labels.field_center_smooth_px`, currently set to `0`.
+- `scripts/phase0_consistency_and_displacement.py`, `scripts/evaluate.py`, and `scripts/diagnose_aifs_transfer.py` now use the same new field-center function and label config.
+- Added `scripts/check_field_center.py` to compare old global argmin against new local descent.
+- Added `tests/test_labels.py` for synthetic two-low regression tests.
+
+Config change:
+
+```yaml
+labels:
+  mode: "in_field"
+  search_radius_km: 100
+  sigma_px: 3
+  field_center_smooth_px: 0
+```
+
+Claude's note suggested trying `250 km`, but real-data scanning showed that `250 km` still allowed descent to drift along large-scale pressure slopes:
+
+```text
+radius=50:  median=34.66 km p90=45.81 km lt100=200/200
+radius=75:  median=56.72 km p90=71.48 km lt100=200/200
+radius=100: median=77.74 km p90=94.41 km lt100=200/200
+radius=125: median=107.81 km p90=121.22 km lt100=64/200
+radius=150: median=128.07 km p90=146.01 km lt100=37/200
+radius=200: median=179.34 km p90=195.92 km lt100=37/200
+radius=250: median=224.25 km p90=245.45 km lt100=37/200
+```
+
+Therefore `100 km` was selected as the safe descent cap for this dataset.
+
+### 14.2 `check_field_center.py` Gate
+
+Command:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\check_field_center.py --config configs\finetune.yaml --max-samples 10000
+```
+
+Result on all available short-lead AIFS/IBTrACS samples (`n=512`):
+
+```text
+old_global_argmin: median_dist_to_truth=492.75 km (n=512)
+new_local_descent: median_dist_to_truth=78.60 km (n=512)
+PASS
+```
+
+This passes the Step 0 gate:
+
+- `new_median < 100 km`
+- `new_median < old_median * 0.5`
+
+### 14.3 Phase 0 Recomputed Displacement
+
+Command:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\phase0_consistency_and_displacement.py --config configs\finetune.yaml
+```
+
+Outputs written locally:
+
+```text
+outputs/phase0/displacement_vs_lead.csv
+outputs/phase0/displacement_summary_by_lead.csv
+outputs/phase0/displacement_vs_lead.png
+```
+
+Recomputed `outputs/phase0/displacement_summary_by_lead.csv`:
+
+```text
+lead_bin,n,mean_km,median_km,p75_km,p90_km
+000-024,409,75.39163097002496,78.61268551847417,86.67838325911845,94.36343390957076
+024-048,413,75.89362606323378,79.14641663836808,86.67838325911845,94.31239706175941
+048-096,832,76.52016858988539,79.41544518901765,87.38986417696383,95.14730273388481
+096-120,418,75.98683148293267,79.4105538422786,87.56790249940752,94.8550376157602
+```
+
+The script printed:
+
+```text
+建议 labels.mode = in_field
+建议 finetune.lead_max = 24
+建议 labels.search_radius_km = 100
+```
+
+D5 warning remains unchanged:
+
+```text
+ERA5 只有预计算 vo_850，缺少 u850/v850，无法自动验证 D5 口径一致性
+```
+
+### 14.4 Label Caches Rebuilt
+
+Command:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\build_label_cache.py --config configs\finetune.yaml --domain all
+```
+
+Local rebuilt cache counts:
+
+```text
+data/label_cache/era5: 3748 .npz
+data/label_cache/aifs: 1230 .npz
+```
+
+These `.npz` files remain ignored by Git.
+
+### 14.5 Current Checkpoint Re-Evaluated Without Retraining
+
+Command:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\evaluate.py --config configs\infer.yaml --predictions outputs\predictions.csv
+```
+
+Recomputed `outputs/metrics_by_lead.csv` using the repaired reference centers:
+
+```text
+lead_bin,n_ref,recall,loc_error_median_km,track_bias_median_km,end2end_median_km
+000-024,409,0.029339853300733496,405.17500080284145,78.61268551847417,462.38708523812954
+024-048,413,0.04116222760290557,405.2196307884753,79.14641663836808,460.9396159466754
+048-096,832,0.030048076923076924,451.6144349544209,79.41544518901765,492.8076030704881
+096-120,418,0.02631578947368421,504.80607607577906,79.4105538422786,550.3660606662456
+```
+
+Recomputed `outputs/precision_recall.csv`:
+
+```text
+conf_thresh,precision,recall
+0.1,0.002912327939115861,0.024508670520231216
+0.2,0.004341819617130452,0.005086705202312139
+0.3,0.00505369551484523,0.0018497109826589595
+0.5,0.009950248756218905,0.00046242774566473987
+0.7,0.058823529411764705,0.00023121387283236994
+```
+
+Interpretation:
+
+- Step 0 succeeded for the reference/label definition: `track_bias_median_km` fell from about 490 km to about 79 km.
+- The current checkpoint should not be judged as final after this repair because it was trained on the old, wrong field centers.
+- The lower recall/precision after re-evaluation is expected and is evidence that the previous M4 checkpoint had learned to follow the old mis-snapped labels.
+- The next valid project step is to retrain/fine-tune using the rebuilt label caches, after implementing or confirming the no-leakage split strategy requested in Claude's plan.
+
+### 14.6 Validation Commands
+
+Commands run after the repair:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\check_field_center.py --config configs\finetune.yaml --max-samples 10000
+$env:TMP='F:\typhoon_loc\.pytest_tmp'; $env:TEMP='F:\typhoon_loc\.pytest_tmp'; python -m pytest tests
+D:\study\envs\tc_loc\python.exe -m compileall tclocator scripts
+```
+
+Results:
+
+```text
+check_field_center: PASS
+pytest: 5 passed, 1 skipped
+compileall: passed
+```
+
+### 14.7 Git Commit
+
+The Step 0 repair was committed and pushed:
+
+```text
+998cc55 fix(labels): replace global argmin field center
+```
+
+This commit is on `origin/main` at `https://github.com/rightlmr/typhoon_loc.git`.
