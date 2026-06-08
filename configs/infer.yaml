@@ -22,7 +22,7 @@ labels:
   search_radius_km: 500
   sigma_px: 3
 decode:
-  conf_thresh: 0.3
+  conf_thresh: 0.1
   lat_filter: [0.0, 40.0]
 finetune:
   freeze_encoder: true

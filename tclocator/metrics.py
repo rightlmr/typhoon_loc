@@ -34,7 +34,13 @@ def match_predictions(
     *,
     hit_threshold_km: float = 60.0,
 ) -> pd.DataFrame:
-    """Greedily match predictions to references at each valid time."""
+    """Greedily match predictions to references for each comparable forecast field.
+
+    AIFS files can share the same valid time across different initialization
+    times and forecast leads. When both inputs carry ``LEAD_HOUR``, it is part
+    of the matching key so a prediction from one forecast field cannot satisfy a
+    reference from another field with the same ``ISO_TIME``.
+    """
 
     rows: list[dict[str, object]] = []
     if references.empty:
@@ -44,9 +50,19 @@ def match_predictions(
     ref = references.copy()
     pred["ISO_TIME"] = pd.to_datetime(pred["ISO_TIME"], utc=True, errors="coerce")
     ref["ISO_TIME"] = pd.to_datetime(ref["ISO_TIME"], utc=True, errors="coerce")
+    group_keys = ["ISO_TIME"]
+    if "LEAD_HOUR" in pred.columns and "LEAD_HOUR" in ref.columns:
+        pred["LEAD_HOUR"] = pd.to_numeric(pred["LEAD_HOUR"], errors="coerce").astype("Int64")
+        ref["LEAD_HOUR"] = pd.to_numeric(ref["LEAD_HOUR"], errors="coerce").astype("Int64")
+        group_keys.append("LEAD_HOUR")
 
-    for time, ref_group in ref.groupby("ISO_TIME"):
-        pred_group = pred.loc[pred["ISO_TIME"] == time].copy()
+    for key, ref_group in ref.groupby(group_keys):
+        if len(group_keys) == 1:
+            time = key
+            pred_group = pred.loc[pred["ISO_TIME"] == time].copy()
+        else:
+            time, lead_hour = key
+            pred_group = pred.loc[(pred["ISO_TIME"] == time) & (pred["LEAD_HOUR"] == lead_hour)].copy()
         used_pred: set[int] = set()
         for _, ref_row in ref_group.iterrows():
             best_idx: int | None = None
@@ -155,4 +171,3 @@ def precision_recall_curve(
         recall = tp / max(tp + fn, 1)
         rows.append({"conf_thresh": float(threshold), "precision": precision, "recall": recall})
     return pd.DataFrame(rows)
-
