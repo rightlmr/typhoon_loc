@@ -52,6 +52,7 @@ def _build_references(config: dict[str, Any], split: str) -> pd.DataFrame:
         return pd.DataFrame()
     domain = DomainConfig.from_mapping(config.get("domain"))
     label_cfg = config.get("labels", {})
+    label_mode = str(label_cfg.get("mode", "in_field"))
     records = read_ibtracs(ib_path, config.get("ibtracs", {}).get("col_map", {}))
     rows: list[dict[str, Any]] = []
     for path in files:
@@ -59,23 +60,34 @@ def _build_references(config: dict[str, Any], split: str) -> pd.DataFrame:
         at_time = records_at_time(records, pd.Timestamp(meta.valid_time))
         if at_time.empty:
             continue
-        field, _ = read_aifs_channels(path, channels=["msl"], domain=domain, aifs_config=config.get("aifs", {}))
+        field = None
+        if label_mode == "in_field":
+            field, _ = read_aifs_channels(path, channels=["msl"], domain=domain, aifs_config=config.get("aifs", {}))
         for _, record in at_time.iterrows():
-            lat_field, lon_field = find_field_min_center(
-                field[0],
-                float(record["LAT"]),
-                float(record["LON"]),
-                domain,
-                float(label_cfg.get("search_radius_km", 300.0)),
-                smooth_px=int(label_cfg.get("field_center_smooth_px", 0)),
-            )
+            lat_true = float(record["LAT"])
+            lon_true = float(record["LON"])
+            if label_mode == "ibtracs":
+                lat_field, lon_field = lat_true, lon_true
+            elif label_mode == "in_field":
+                if field is None:
+                    raise RuntimeError("MSL field was not loaded for in_field evaluation")
+                lat_field, lon_field = find_field_min_center(
+                    field[0],
+                    lat_true,
+                    lon_true,
+                    domain,
+                    float(label_cfg.get("search_radius_km", 300.0)),
+                    smooth_px=int(label_cfg.get("field_center_smooth_px", 0)),
+                )
+            else:
+                raise ValueError("labels.mode must be 'ibtracs' or 'in_field'")
             rows.append(
                 {
                     "ISO_TIME": meta.valid_time.isoformat(),
                     "SID": record["SID"],
                     "LEAD_HOUR": meta.forecast_hour,
-                    "LAT_TRUE": float(record["LAT"]),
-                    "LON_TRUE": float(record["LON"]),
+                    "LAT_TRUE": lat_true,
+                    "LON_TRUE": lon_true,
                     "LAT_FIELD": lat_field,
                     "LON_FIELD": lon_field,
                 }

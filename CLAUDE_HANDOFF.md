@@ -2,7 +2,7 @@
 
 Last updated: 2026-06-08 Asia/Shanghai
 
-Latest update after Claude `STEP1_SPLIT_RETRAIN.md`: Step 1 leakage-free grouped split was implemented, pretraining/fine-tuning were rerun on repaired labels, and val-only AIFS evaluation was completed. The result did not pass: validation `end2end_median_km` remains far above the Step 0 baseline, and cap-hit diagnostics show `cap_fraction=0.814`. Because `.gitignore` intentionally excludes `outputs/`, `*.ckpt`, and `*.npz`, the local real-data artifacts are summarized in Sections 14 and 15.
+Latest update after Claude `STEP2_IBTRACS_LABEL.md`: Step 2 changed only the short-lead AIFS target/evaluation reference from `in_field` to `ibtracs`, added storm signal diagnostics, rebuilt AIFS labels, and reran fine-tuning/evaluation. The result did not pass: val `end2end@000-024 = 5620.43 km`, train `end2end@000-024 = 2259.09 km`, and `storm_signal.csv` shows weak/offset MSL and vo_850 extrema near truth. Because `.gitignore` intentionally excludes `outputs/`, `*.ckpt`, and `*.npz`, the local real-data artifacts are summarized in Sections 14-16.
 
 This document summarizes the work completed after the initial code generation of the typhoon localization project, the data/environment adaptations, the training/evaluation history, the bugs found, and the current usable state.
 
@@ -954,3 +954,217 @@ Reason:
 - Pretraining still works on ERA5.
 - AIFS fine-tuning fails on train and val.
 - `cap_fraction=0.814` shows the present msl-only target is often not a real local-pressure center.
+
+## 16. Step 2 IBTrACS Short-Lead Target Results
+
+This section records the real-data results from `D:\downloads\STEP2_IBTRACS_LABEL.md`. The goal was to change one variable only: AIFS short-lead labels/evaluation references use IBTrACS truth instead of `in_field` field centers. Pretraining was not rerun.
+
+### 16.1 Code And Config Changes
+
+Changed:
+
+- `configs/finetune.yaml`: `labels.mode` changed from `"in_field"` to `"ibtracs"`.
+- `configs/infer.yaml`: `labels.mode` changed from `"in_field"` to `"ibtracs"`.
+- `scripts/evaluate.py::_build_references`: when `labels.mode == "ibtracs"`, `LAT_FIELD/LON_FIELD` are set directly to `LAT_TRUE/LON_TRUE`; `find_field_min_center` is only used in the unchanged `in_field` branch.
+- Added `scripts/inspect_storms.py`.
+
+Not changed:
+
+- `configs/pretrain.yaml` remains `labels.mode: "in_field"`.
+- No model/loss/decode/descent/cap/fine-tune-protocol changes.
+- No ERA5 pretraining was rerun.
+
+Note on optional PNGs:
+
+- `inspect_storms.py` writes the required CSV by default.
+- Optional PNG output is behind `--plots`; matplotlib was installed but crashed in this environment inside `numpy.linalg` during `savefig`, so PNGs were not used.
+
+### 16.2 Storm Signal Diagnostic
+
+Command after Step2 retraining:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\inspect_storms.py --config configs\finetune.yaml --max-cases 6
+```
+
+Summary:
+
+```text
+cases=6
+median msl_min_dist_km = 196.43
+median vo_max_dist_km  = 183.94
+median dist_pred_truth_km = 12709.98
+```
+
+`outputs/diagnostics/storm_signal.csv`:
+
+```text
+sid,valid_time,lead_hour,true_lat,true_lon,pred_lat,pred_lon,pred_conf,dist_pred_truth_km,msl_at_truth_pa,msl_min_pa,msl_min_dist_km,vo_at_truth,vo_max,vo_max_dist_km
+2024244N09137,2024-09-07T12:00:00+00:00,0,21.0,106.0,20.476185735315084,268.02421379461884,0.12024269998073578,15006.205964441891,101150.8671875,101046.8671875,174.75770781093388,2.135442446160596e-05,5.02247094118502e-05,181.66555536368122
+2024246N22147,2024-09-07T12:00:00+00:00,0,44.0,160.39999999999998,20.476185735315084,268.02421379461884,0.12024269998073578,9759.212424410282,101814.8671875,101614.8671875,187.96294206255263,-2.0343461073935032e-05,8.017124491743743e-05,189.08994314153068
+2024244N09137,2024-09-07T18:00:00+00:00,6,21.0,105.39999999999998,21.23092552088201,285.2695224098861,0.19615057110786438,15319.200741929113,101056.484375,100936.484375,199.3489578332469,1.2647826224565506e-05,7.560780068160966e-05,186.2238256503907
+2024246N22147,2024-09-07T18:00:00+00:00,6,46.4,164.79999999999995,21.23092552088201,285.2695224098861,0.19615057110786438,10413.749278654706,101408.484375,101196.484375,198.37984941011442,6.1562723203678615e-06,5.746651368099265e-05,160.1881325690075
+2024244N09137,2024-09-08T00:00:00+00:00,12,21.1,104.8,21.47117779031396,285.28048124164343,0.11308617144823074,15281.100313275088,101010.2421875,100946.2421875,196.50110316661022,2.4673592633916996e-05,5.6192573538282886e-05,188.8845345210406
+2024246N22147,2024-09-08T00:00:00+00:00,12,48.6,169.20000000000005,21.47117779031396,285.28048124164343,0.11308617144823074,9982.012782820431,101190.2421875,101038.2421875,196.35257160201462,5.063425487605855e-05,7.125219417503104e-05,61.06201506636
+```
+
+Interpretation:
+
+- MSL minima inside 200 km are still nearly at the search boundary.
+- vo_850 maxima are only slightly closer in the 6-case sample, except one case at 61 km.
+- Model top peaks are very far from truth, typically near unrelated strong signals.
+
+### 16.3 Backup And Label Cache Rebuild
+
+Step 1 in-field outputs were backed up to:
+
+```text
+outputs/m4_step1_infield_baseline/
+```
+
+Backed up:
+
+```text
+finetune_best.ckpt
+predictions*.csv
+metrics_by_lead*.csv
+precision_recall*.csv
+matched_metrics*.csv
+```
+
+AIFS labels were rebuilt with `labels.mode: ibtracs`:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\build_label_cache.py --config configs\finetune.yaml --domain aifs
+```
+
+### 16.4 Fine-Tuning Curve
+
+Command:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\finetune.py --config configs\finetune.yaml
+```
+
+Training output:
+
+```text
+Loaded F:\typhoon_loc\outputs\pretrain_best.ckpt
+AIFS split group_by=init_time train n=120 val n=30 val_groups=['2024-09-07T12:00:00+00:00', '2024-09-11T12:00:00+00:00', '2024-09-15T12:00:00+00:00', '2024-09-20T12:00:00+00:00', '2024-09-23T12:00:00+00:00', '2024-09-27T12:00:00+00:00']
+epoch=1 train_loss=7.0795 val_center_mae_km=1148.23
+epoch=2 train_loss=4.7428 val_center_mae_km=1285.28
+epoch=3 train_loss=4.6309 val_center_mae_km=1240.95
+epoch=4 train_loss=4.5748 val_center_mae_km=1351.14
+epoch=5 train_loss=4.5233 val_center_mae_km=1233.19
+epoch=6 train_loss=4.4684 val_center_mae_km=1173.64
+epoch=7 train_loss=4.3895 val_center_mae_km=1222.52
+epoch=8 train_loss=4.2903 val_center_mae_km=1826.52
+epoch=9 train_loss=4.1776 val_center_mae_km=1821.51
+Wrote F:\typhoon_loc\outputs\finetune_best.ckpt
+```
+
+### 16.5 Validation Metrics
+
+Commands:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\predict.py --config configs\infer.yaml --domain aifs --split val
+D:\study\envs\tc_loc\python.exe scripts\evaluate.py --config configs\infer.yaml --split val --predictions outputs\predictions_val.csv
+```
+
+`outputs/metrics_by_lead_val.csv`:
+
+```text
+lead_bin,n_ref,recall,loc_error_median_km,track_bias_median_km,end2end_median_km
+000-024,94,0.0,5620.428737989904,0.0,5620.428737989904
+024-048,95,0.0,3762.6404626371677,0.0,3762.6404626371677
+048-096,170,0.011764705882352941,2253.505891245527,0.0,2253.505891245527
+096-120,108,0.0,7462.809873202623,0.0,7462.809873202623
+```
+
+`outputs/precision_recall_val.csv`:
+
+```text
+conf_thresh,precision,recall
+0.1,0.005154639175257732,0.00211864406779661
+0.2,0.125,0.001059322033898305
+0.3,0.0,0.0
+0.5,0.0,0.0
+0.7,0.0,0.0
+```
+
+### 16.6 Train Split Metrics
+
+Commands:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\predict.py --config configs\infer.yaml --domain aifs --split train
+D:\study\envs\tc_loc\python.exe scripts\evaluate.py --config configs\infer.yaml --split train --predictions outputs\predictions_train.csv
+```
+
+`outputs/metrics_by_lead_train.csv`:
+
+```text
+lead_bin,n_ref,recall,loc_error_median_km,track_bias_median_km,end2end_median_km
+000-024,315,0.009523809523809525,2259.0928400785956,0.0,2259.0928400785956
+024-048,318,0.012578616352201259,2117.0371668536154,0.0,2117.0371668536154
+048-096,662,0.004531722054380665,3254.4388091227775,0.0,3254.4388091227775
+096-120,310,0.00967741935483871,2822.4289771317467,0.0,2822.4289771317467
+```
+
+`outputs/precision_recall_train.csv`:
+
+```text
+conf_thresh,precision,recall
+0.1,0.007859733978234583,0.003845016267376516
+0.2,0.0,0.0
+0.3,0.0,0.0
+0.5,0.0,0.0
+0.7,0.0,0.0
+```
+
+### 16.7 Decision Tree Result
+
+Step 2 does not pass.
+
+Decision tree category:
+
+```text
+train 0-24h still very poor: AIFS msl/vo signal is too weak under the current frozen-encoder + Tier A channel setup.
+```
+
+Evidence:
+
+- Val `end2end@000-024 = 5620.43 km`, worse than Step 1 val and far worse than the target 100-200 km.
+- Train `end2end@000-024 = 2259.09 km`, so the current setup cannot even fit the training split.
+- In `ibtracs` mode, `track_bias_median_km = 0.0`, confirming evaluation correctly uses truth as the reference center.
+- `storm_signal.csv` shows local MSL minima and vo_850 maxima near truth are usually close to the 200 km diagnostic boundary, not centered on truth.
+
+Recommended next step:
+
+- Do not keep tuning only the label mode.
+- Since vo_850 is only marginally better than MSL in the 6-case diagnostic, the next most defensible independent variable is Tier B input channels, especially adding `t_850`, followed by a controlled comparison of frozen encoder vs partial unfreeze.
+- If pursuing a vo target/fallback, first broaden `inspect_storms.py --max-cases` beyond 6 to verify whether `vo_max_dist_km` is consistently better across more validation cases.
+
+### 16.8 Verification Notes
+
+Commands/checks completed:
+
+```powershell
+D:\study\envs\tc_loc\python.exe -m compileall tclocator scripts tests
+D:\study\envs\tc_loc\python.exe -c "import runpy; ns=runpy.run_path('tests/test_split.py'); ns['test_grouped_split_keeps_all_leads_of_init_together'](); ns['test_select_aifs_files_uses_same_deterministic_split'](); print('split tests ok')"
+D:\study\envs\tc_loc\python.exe scripts\predict.py --config configs\infer.yaml --domain aifs --split val --smoke-synthetic
+D:\study\envs\tc_loc\python.exe scripts\evaluate.py --config configs\infer.yaml --split val --smoke-synthetic
+```
+
+Results:
+
+```text
+compileall: passed
+split tests: passed
+predict/evaluate smoke: passed
+```
+
+Important operational note:
+
+- The smoke `predict/evaluate` commands write `_val` files, so real val prediction/evaluation was rerun after the smoke checks to restore `outputs/predictions_val.csv`, `outputs/metrics_by_lead_val.csv`, and `outputs/precision_recall_val.csv`.

@@ -18,7 +18,7 @@ aifs:
 ibtracs:
   col_map: {time: "ISO_TIME", sid: "SID", lat: "LAT", lon: "LON"}
 labels:
-  mode: "in_field"
+  mode: "ibtracs"
   search_radius_km: 100
   sigma_px: 3
   field_center_smooth_px: 0
