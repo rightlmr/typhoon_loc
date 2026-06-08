@@ -106,7 +106,8 @@ def _real_displacements(config: dict[str, Any]) -> pd.DataFrame:
 
     domain = DomainConfig.from_mapping(config.get("domain"))
     labels_cfg = config.get("labels", {})
-    radius = float(labels_cfg.get("phase0_search_radius_km", 500.0))
+    radius = float(labels_cfg.get("search_radius_km", 100.0))
+    smooth_px = int(labels_cfg.get("field_center_smooth_px", 0))
     records = read_ibtracs(ibtracs_path, config.get("ibtracs", {}).get("col_map", {}))
     rows: list[dict[str, Any]] = []
     for path in aifs_files:
@@ -117,7 +118,14 @@ def _real_displacements(config: dict[str, Any]) -> pd.DataFrame:
         field, _ = read_aifs_channels(path, channels=["msl"], domain=domain, aifs_config=config.get("aifs", {}))
         msl = field[0]
         for _, record in at_time.iterrows():
-            lat_field, lon_field = find_field_min_center(msl, float(record["LAT"]), float(record["LON"]), domain, radius)
+            lat_field, lon_field = find_field_min_center(
+                msl,
+                float(record["LAT"]),
+                float(record["LON"]),
+                domain,
+                radius,
+                smooth_px=smooth_px,
+            )
             displacement = float(haversine_km(record["LAT"], record["LON"], lat_field, lon_field))
             rows.append(
                 {
@@ -228,11 +236,11 @@ def _write_png(path: Path, image: np.ndarray) -> None:
     path.write_bytes(png)
 
 
-def _suggest(df: pd.DataFrame, summary: pd.DataFrame) -> dict[str, Any]:
+def _suggest(df: pd.DataFrame, summary: pd.DataFrame, *, current_radius_km: float = 100.0) -> dict[str, Any]:
     """Suggest labels.mode, lead_max, and search radius from Phase 0 results."""
 
     if df.empty:
-        return {"labels.mode": None, "finetune.lead_max": None, "labels.search_radius_km": 300}
+        return {"labels.mode": None, "finetune.lead_max": None, "labels.search_radius_km": int(current_radius_km)}
     all_small = not summary.empty and bool((summary["median_km"] < 75.0).all())
     labels_mode = "ibtracs" if all_small else "in_field"
     acceptable = summary.loc[summary["median_km"] <= 75.0]
@@ -240,8 +248,7 @@ def _suggest(df: pd.DataFrame, summary: pd.DataFrame) -> dict[str, Any]:
         lead_max = int(min(24, df["lead_hour"].max()))
     else:
         lead_max = int(acceptable["lead_bin"].iloc[-1].split("-")[1])
-    p90 = float(df["displacement_km"].quantile(0.90))
-    radius = int(max(300, np.ceil(p90 / 50.0) * 50))
+    radius = int(current_radius_km)
     return {"labels.mode": labels_mode, "finetune.lead_max": lead_max, "labels.search_radius_km": radius}
 
 
@@ -272,7 +279,11 @@ def main() -> int:
         print(f"Wrote {png}")
 
     summary = _summarize(df) if not df.empty else pd.DataFrame()
-    suggestions = _suggest(df, summary)
+    suggestions = _suggest(
+        df,
+        summary,
+        current_radius_km=float(config.get("labels", {}).get("search_radius_km", 100.0)),
+    )
     print(f"vo_850 consistency: {vo_result}")
     print(f"建议 labels.mode = {suggestions['labels.mode']}")
     print(f"建议 finetune.lead_max = {suggestions['finetune.lead_max']}")

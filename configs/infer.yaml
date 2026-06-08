@@ -19,8 +19,9 @@ ibtracs:
   col_map: {time: "ISO_TIME", sid: "SID", lat: "LAT", lon: "LON"}
 labels:
   mode: "in_field"
-  search_radius_km: 500
+  search_radius_km: 100
   sigma_px: 3
+  field_center_smooth_px: 0
 decode:
   conf_thresh: 0.1
   lat_filter: [0.0, 40.0]

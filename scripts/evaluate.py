@@ -49,6 +49,7 @@ def _build_references(config: dict[str, Any]) -> pd.DataFrame:
     if not files or not ib_path.exists():
         return pd.DataFrame()
     domain = DomainConfig.from_mapping(config.get("domain"))
+    label_cfg = config.get("labels", {})
     records = read_ibtracs(ib_path, config.get("ibtracs", {}).get("col_map", {}))
     rows: list[dict[str, Any]] = []
     for path in files:
@@ -63,7 +64,8 @@ def _build_references(config: dict[str, Any]) -> pd.DataFrame:
                 float(record["LAT"]),
                 float(record["LON"]),
                 domain,
-                float(config.get("labels", {}).get("search_radius_km", 300.0)),
+                float(label_cfg.get("search_radius_km", 300.0)),
+                smooth_px=int(label_cfg.get("field_center_smooth_px", 0)),
             )
             rows.append(
                 {

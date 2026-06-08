@@ -31,6 +31,7 @@ def build_aifs_references(config: dict[str, Any]) -> pd.DataFrame:
     """Build AIFS references with field-consistent centers."""
 
     domain = DomainConfig.from_mapping(config.get("domain"))
+    label_cfg = config.get("labels", {})
     records = read_ibtracs(config["paths"]["ibtracs_csv"], config.get("ibtracs", {}).get("col_map", {}))
     rows: list[dict[str, Any]] = []
     files = iter_files(config["paths"]["aifs_dir"], [".pt", ".grib2", ".grb2", ".grib"])
@@ -46,7 +47,8 @@ def build_aifs_references(config: dict[str, Any]) -> pd.DataFrame:
                 float(record["LAT"]),
                 float(record["LON"]),
                 domain,
-                float(config.get("labels", {}).get("search_radius_km", 300.0)),
+                float(label_cfg.get("search_radius_km", 300.0)),
+                smooth_px=int(label_cfg.get("field_center_smooth_px", 0)),
             )
             rows.append(
                 {
