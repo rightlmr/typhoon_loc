@@ -1168,3 +1168,318 @@ predict/evaluate smoke: passed
 Important operational note:
 
 - The smoke `predict/evaluate` commands write `_val` files, so real val prediction/evaluation was rerun after the smoke checks to restore `outputs/predictions_val.csv`, `outputs/metrics_by_lead_val.csv`, and `outputs/precision_recall_val.csv`.
+
+## 17. Step 3 AIFS `.pt` Orientation Fix
+
+Step 3 followed `D:\downloads\STEP3_FIX_AIFS_ORIENTATION.md`. The only code path changed was serialized AIFS `.pt` spatial alignment in `tclocator/io_aifs.py`; channel order, normalization method, `calc_vo850`, model, losses, decode, labels, descent/cap logic, fine-tuning protocol, and `configs/pretrain.yaml` were not changed.
+
+Important consequence:
+
+- All AIFS results produced before this fix, including Step 1 and Step 2, should be treated as results from spatially misaligned AIFS fields and are not reliable.
+- New AIFS results below are the first reliable post-alignment metrics.
+
+### 17.1 Orientation Audit
+
+Command:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\audit_aifs_orientation.py --config configs\finetune.yaml
+```
+
+Output:
+
+```text
+file=F:\typhoon_loc\data\aifs\AIFS_2024_09_07_12_FCST_000h.pt
+tensor_shape=(16, 721, 1440) msl_index=2
+msl_raw_min_hPa=952.71 max_hPa=1043.91 mean_hPa=1007.56
+array	lat_order	lon_mode	row	col	sampled_msl_hPa
+raw	north_first	from_0	276	424	1011.50
+raw	north_first	roll_180	276	1144	984.97
+raw	north_first	from_180	276	1144	984.97
+raw	south_first	from_0	444	424	1016.45
+raw	south_first	roll_180	444	1144	1022.38
+raw	south_first	from_180	444	1144	1022.38
+transpose_probe	north_first	from_0	276	424	1015.31
+transpose_probe	north_first	roll_180	276	423	1015.13
+transpose_probe	north_first	from_180	276	423	1015.13
+transpose_probe	south_first	from_0	444	424	1020.30
+transpose_probe	south_first	roll_180	444	423	1020.81
+transpose_probe	south_first	from_180	444	423	1020.81
+WINNER: array=raw lat_order=north_first lon_mode=roll_180 sampled_msl_hPa=984.97
+global_argmin_north_first_from_0: row=583 col=1434 lat=-55.75 lon=358.50 msl_hPa=952.71
+```
+
+Conclusion:
+
+- The tensor is `[C, 721, 1440]`, raw array, north-first latitude.
+- `.pt` longitude is effectively indexed as `[-180, -179.75, ..., 179.75]`, not `[0, 0.25, ..., 359.75]`.
+- The production `.pt` crop now uses `PT_GLOBAL_LON = (col * 0.25 - 180) % 360`.
+- GRIB cropping still uses the original `GLOBAL_LON = 0..359.75`.
+
+### 17.2 Code Change
+
+Changed `tclocator/io_aifs.py`:
+
+```text
+PT_GLOBAL_LON = np.mod(np.arange(1440, dtype=np.float64) * 0.25 - 180.0, 360.0)
+
+def crop_aifs_pt_global(values: np.ndarray, domain: DomainConfig) -> np.ndarray:
+    return crop_regular_latlon_grid(values, GLOBAL_LAT, PT_GLOBAL_LON, domain)
+```
+
+`read_aifs_channels()` now dispatches:
+
+- `.pt` files: `read_aifs_pt_variable()` then `crop_aifs_pt_global()`.
+- GRIB files: `read_aifs_variable()` then `crop_aifs_global()`.
+
+Added scripts:
+
+- `scripts/audit_aifs_orientation.py`
+- `scripts/check_aifs_alignment.py`
+
+### 17.3 Alignment Gate
+
+Before the fix, the hard gate failed:
+
+```text
+2024244N09137 valid=2024-09-07T12:00:00 truth=(21.00,106.00) msl_truth_hPa=1011.51 min100_hPa=1010.99 min100=(20.25,106.00) min100_dist_km=83.40 FAIL
+FAIL
+```
+
+After the fix:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\check_aifs_alignment.py --config configs\finetune.yaml
+```
+
+```text
+2024244N09137 valid=2024-09-07T12:00:00 truth=(21.00,106.00) msl_truth_hPa=982.95 min100_hPa=981.59 min100=(21.25,106.00) min100_dist_km=27.80 PASS
+PASS
+```
+
+The Step 3 hard gate passed before any downstream norm/cache/retrain work was run.
+
+### 17.4 Downstream Rebuild
+
+Backed up Step 2 artifacts to:
+
+```text
+outputs/m4_step2_ibtracs_baseline/
+```
+
+Backed up files included:
+
+```text
+finetune_best.ckpt
+predictions.csv
+predictions_train.csv
+predictions_val.csv
+metrics_by_lead.csv
+metrics_by_lead_train.csv
+metrics_by_lead_val.csv
+precision_recall.csv
+precision_recall_train.csv
+precision_recall_val.csv
+matched_metrics.csv
+matched_metrics_train.csv
+matched_metrics_val.csv
+norm_stats_aifs.json
+```
+
+Recomputed AIFS normalization stats:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\compute_norm_stats.py --config configs\finetune.yaml --domain aifs
+```
+
+```text
+Wrote F:\typhoon_loc\outputs\norm_stats_aifs.json
+```
+
+New `outputs/norm_stats_aifs.json`:
+
+```json
+{
+  "channels": ["msl", "vo_850", "t_500"],
+  "stats": {
+    "msl": {"method": "zscore", "mean": 101273.23387616295, "std": 705.6261537486697, "shift": 0.0},
+    "vo_850": {"method": "zscore", "mean": -5.771534547605652e-07, "std": 3.2446931898418934e-05, "shift": 0.0},
+    "t_500": {"method": "zscore", "mean": 262.37134432207915, "std": 8.34764666990409, "shift": 0.0}
+  }
+}
+```
+
+Rebuilt AIFS label cache:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\build_label_cache.py --config configs\finetune.yaml --domain aifs
+```
+
+Completed successfully and rewrote AIFS `.npz` label-cache files under `outputs/label_cache_aifs`.
+
+### 17.5 Fine-Tuning Curve
+
+Command:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\finetune.py --config configs\finetune.yaml
+```
+
+Output:
+
+```text
+Loaded F:\typhoon_loc\outputs\pretrain_best.ckpt
+AIFS split group_by=init_time train n=120 val n=30 val_groups=['2024-09-07T12:00:00+00:00', '2024-09-11T12:00:00+00:00', '2024-09-15T12:00:00+00:00', '2024-09-20T12:00:00+00:00', '2024-09-23T12:00:00+00:00', '2024-09-27T12:00:00+00:00']
+epoch=1 train_loss=1.9620 val_center_mae_km=68.33
+epoch=2 train_loss=1.6037 val_center_mae_km=68.27
+epoch=3 train_loss=1.4510 val_center_mae_km=68.12
+epoch=4 train_loss=1.3740 val_center_mae_km=74.99
+epoch=5 train_loss=1.3135 val_center_mae_km=75.25
+epoch=6 train_loss=1.2525 val_center_mae_km=71.31
+epoch=7 train_loss=1.1955 val_center_mae_km=73.26
+epoch=8 train_loss=1.1315 val_center_mae_km=72.61
+epoch=9 train_loss=1.0710 val_center_mae_km=73.11
+epoch=10 train_loss=1.0142 val_center_mae_km=72.79
+epoch=11 train_loss=0.9574 val_center_mae_km=83.65
+Wrote F:\typhoon_loc\outputs\finetune_best.ckpt
+```
+
+This is a large correction relative to Step 2, where val center MAE was above 1100 km and train/eval end-to-end errors were in the thousands of km.
+
+### 17.6 Validation Metrics
+
+Commands:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\predict.py --config configs\infer.yaml --domain aifs --split val
+D:\study\envs\tc_loc\python.exe scripts\evaluate.py --config configs\infer.yaml --split val --predictions outputs\predictions_val.csv
+```
+
+`outputs/metrics_by_lead_val.csv`:
+
+```text
+lead_bin,n_ref,recall,loc_error_median_km,track_bias_median_km,end2end_median_km
+000-024,94,0.5531914893617021,52.212656399533614,0.0,52.212656399533614
+024-048,95,0.5052631578947369,58.10950795713562,0.0,58.10950795713562
+048-096,170,0.16470588235294117,158.54689768652085,0.0,158.54689768652085
+096-120,108,0.07407407407407407,243.87023417136436,0.0,243.87023417136436
+```
+
+`outputs/precision_recall_val.csv`:
+
+```text
+conf_thresh,precision,recall
+0.1,0.04312590448625181,0.15783898305084745
+0.2,0.10219594594594594,0.1281779661016949
+0.3,0.1396011396011396,0.1038135593220339
+0.5,0.11187214611872145,0.05190677966101695
+0.7,0.10029498525073746,0.036016949152542374
+```
+
+### 17.7 Train Split Metrics
+
+Commands:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\predict.py --config configs\infer.yaml --domain aifs --split train
+D:\study\envs\tc_loc\python.exe scripts\evaluate.py --config configs\infer.yaml --split train --predictions outputs\predictions_train.csv
+```
+
+`outputs/metrics_by_lead_train.csv`:
+
+```text
+lead_bin,n_ref,recall,loc_error_median_km,track_bias_median_km,end2end_median_km
+000-024,315,0.8253968253968254,30.83350527619921,0.0,30.83350527619921
+024-048,318,0.5251572327044025,58.06035898232219,0.0,58.06035898232219
+048-096,662,0.1691842900302115,137.80876032987337,0.0,137.80876032987337
+096-120,310,0.08387096774193549,258.88367265726566,0.0,258.88367265726566
+```
+
+`outputs/precision_recall_train.csv`:
+
+```text
+conf_thresh,precision,recall
+0.1,0.04964138931420743,0.18219461697722567
+0.2,0.12487969201154957,0.15350488021295475
+0.3,0.16200294550810015,0.13013901212658976
+0.5,0.1693548387096774,0.09937888198757763
+0.7,0.15809768637532134,0.07275953859804792
+```
+
+### 17.8 Signal Diagnostic
+
+Command:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\inspect_storms.py --config configs\finetune.yaml --max-cases 10
+```
+
+Output summary:
+
+```text
+PNG diagnostics disabled; pass --plots to enable optional matplotlib output.
+Loaded F:\typhoon_loc\outputs\finetune_best.ckpt
+Wrote F:\typhoon_loc\outputs\diagnostics\storm_signal.csv
+cases=10
+median msl_min_dist_km = 73.28
+median vo_max_dist_km  = 73.28
+median dist_pred_truth_km = 2820.96
+```
+
+The `dist_pred_truth_km` median is not a direct equivalent of `metrics_by_lead`: this diagnostic compares the same per-field top peak against each listed storm at the same valid time. For valid times containing both Yagi and another storm, the top peak correctly lands on Yagi and is then also compared against the other far-away storm. Use the evaluation CSVs above for official split metrics.
+
+`outputs/diagnostics/storm_signal.csv`:
+
+```text
+sid,valid_time,lead_hour,true_lat,true_lon,pred_lat,pred_lon,pred_conf,dist_pred_truth_km,msl_at_truth_pa,msl_min_pa,msl_min_dist_km,vo_at_truth,vo_max,vo_max_dist_km
+2024244N09137,2024-09-07T12:00:00+00:00,0,21.0,106.0,21.13771465420723,106.08008122444153,0.9281761050224304,17.422351728555704,98294.8671875,98158.8671875,27.798731661139723,0.0014159309212118387,0.0015353863127529621,25.952349116302408
+2024246N22147,2024-09-07T12:00:00+00:00,0,44.0,160.39999999999998,21.13771465420723,106.08008122444153,0.9281761050224304,5567.681104747304,100442.8671875,100350.8671875,55.3740671012096,0.00032278639264404774,0.0008603124879300594,73.31924582215831
+2024244N09137,2024-09-07T18:00:00+00:00,6,21.0,105.39999999999998,21.163391940295696,105.34773378074169,0.9067559838294983,18.960361423297073,99604.484375,99568.484375,31.856406748650265,0.0006043613539077342,0.0006966097862459719,31.856406748650265
+2024246N22147,2024-09-07T18:00:00+00:00,6,46.4,164.79999999999995,21.163391940295696,105.34773378074169,0.9067559838294983,6000.38972715748,100492.484375,100196.484375,47.06608766849182,0.00031563686206936836,0.0006572998245246708,22.672656007467722
+2024244N09137,2024-09-08T00:00:00+00:00,12,21.1,104.8,21.155245564877987,105.35779732465744,0.8391200304031372,58.18014134147351,100134.2421875,99882.2421875,125.53726538148678,0.0001496221375418827,0.00034532544668763876,49.55077128920741
+2024246N22147,2024-09-08T00:00:00+00:00,12,48.6,169.20000000000005,21.155245564877987,105.35779732465744,0.8391200304031372,6353.585319588048,100658.2421875,100538.2421875,100.23243455296716,0.0002930602349806577,0.00040337469545193017,153.8115734623359
+2024244N09137,2024-09-08T06:00:00+00:00,18,21.4,104.39999999999998,21.425060272216797,105.11665026843548,0.7872138023376465,74.23974794654339,100466.90625,100018.90625,166.5671383297044,0.00010200658289249986,0.000296311016427353,73.23855548138329
+2024246N22147,2024-09-08T06:00:00+00:00,18,51.0,173.89999999999998,21.425060272216797,105.11665026843548,0.7872138023376465,6701.898097504073,100590.90625,100546.90625,56.590111605480935,7.351593376370147e-05,0.00026872489252127707,194.72160764544128
+2024244N09137,2024-09-08T12:00:00+00:00,24,21.6,104.0,21.898540169000626,103.59931302070618,0.308197557926178,53.051934483442935,100253.1875,100125.1875,185.2764395117866,1.562223224027548e-05,0.00022142416855785996,89.29717414144766
+2024246N22147,2024-09-08T12:00:00+00:00,24,53.0,179.5,21.898540169000626,103.59931302070618,0.308197557926178,7148.211829437412,100753.1875,100697.1875,89.96574270763752,3.410916542634368e-05,0.00020354308071546257,137.06824224262044
+```
+
+### 17.9 Decision Tree Result
+
+Step 3 passes.
+
+Decision tree category:
+
+```text
+train and val both dropped into the ~30-60 km short-lead range, so the AIFS .pt spatial alignment bug was the main blocker and the method is now valid for short-lead AIFS localization.
+```
+
+Evidence:
+
+- Alignment gate passed: Yagi lead-0 truth point now reads `982.95 hPa`, and the 100 km local minimum is `981.59 hPa` at `27.80 km`.
+- Train `end2end@000-024` improved from Step 2 `2259.09 km` to `30.83 km`.
+- Val `end2end@000-024` improved from Step 2 `5620.43 km` to `52.21 km`.
+- Val `end2end@024-048` is also usable at `58.11 km`.
+- Longer leads still have low recall (`048-096` recall `0.165`, `096-120` recall `0.074` on val), so the next work should focus on more AIFS data and long-lead robustness rather than more spatial-orientation changes.
+
+Recommended next step:
+
+- Treat `.pt` orientation as fixed and keep it gated by `scripts/check_aifs_alignment.py`.
+- Do not revisit channel additions or target changes until the current aligned Tier A baseline is preserved.
+- Expand AIFS data coverage and rerun the same aligned pipeline for a broader validation split, then decide whether long-lead recall requires Tier B channels or a detection-confidence change.
+
+### 17.10 Verification Notes
+
+Commands/checks completed after the Step 3 fix:
+
+```powershell
+D:\study\envs\tc_loc\python.exe -m compileall tclocator scripts tests
+D:\study\envs\tc_loc\python.exe -c "import runpy; ns=runpy.run_path('tests/test_split.py'); ns['test_grouped_split_keeps_all_leads_of_init_together'](); ns['test_select_aifs_files_uses_same_deterministic_split'](); print('split tests ok')"
+```
+
+Results:
+
+```text
+compileall: passed
+split tests: passed
+```

@@ -26,6 +26,7 @@ from tclocator.vorticity import calc_vo850
 
 GLOBAL_LAT = np.linspace(90.0, -90.0, 721, dtype=np.float64)
 GLOBAL_LON = np.linspace(0.0, 359.75, 1440, dtype=np.float64)
+PT_GLOBAL_LON = np.mod(np.arange(1440, dtype=np.float64) * 0.25 - 180.0, 360.0)
 
 
 @dataclass(frozen=True)
@@ -175,6 +176,12 @@ def crop_aifs_global(values: np.ndarray, domain: DomainConfig) -> np.ndarray:
     return crop_regular_latlon_grid(values, GLOBAL_LAT, GLOBAL_LON, domain)
 
 
+def crop_aifs_pt_global(values: np.ndarray, domain: DomainConfig) -> np.ndarray:
+    """Crop a serialized AIFS .pt global field to the configured domain."""
+
+    return crop_regular_latlon_grid(values, GLOBAL_LAT, PT_GLOBAL_LON, domain)
+
+
 def read_aifs_channels(
     path: str | Path,
     *,
@@ -193,9 +200,10 @@ def read_aifs_channels(
         if arr is None:
             if Path(path).suffix.lower() == ".pt":
                 raw = read_aifs_pt_variable(path, name, tensor_channel_order=tensor_order)
+                arr = crop_aifs_pt_global(raw, domain)
             else:
                 raw = read_aifs_variable(path, name)
-            arr = crop_aifs_global(raw, domain)
+                arr = crop_aifs_global(raw, domain)
             arrays[name] = arr
         return arr
 
