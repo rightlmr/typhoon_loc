@@ -1483,3 +1483,142 @@ Results:
 compileall: passed
 split tests: passed
 ```
+
+## 18. Step 4 Phase A Data Coverage And Alignment Gate
+
+Step 4 started from `D:\downloads\STEP4_SCALE_DATA.md`. Phase A-0/A is complete. No downstream retraining was run before the coverage and monthly alignment gate.
+
+Code/config changes made for Phase A and later gates:
+
+- `configs/finetune.yaml` and `configs/infer.yaml` now use `paths.aifs_dir: "G:/AIFS_PT"`.
+- Both configs now include `data.usable_months`, currently set to `["2024-05", "2024-06", "2024-07", "2024-08", "2024-09", "2024-10", "2024-11"]`.
+- `tclocator/common.py::iter_files` was already recursive via `rglob("*")`; no change was needed there.
+- `tclocator/split.py` now filters AIFS files by configured usable initialization month, supports `split.val_groups_override`, and uses AIFS init month for `group_by: "year_month"` even when long leads cross into the next valid-time month.
+- AIFS norm stats, label cache, fine-tuning, Phase0 displacement, prediction/evaluation split selection, and field-center diagnostics now share the same usable-month filtering path.
+- `scripts/evaluate.py` now writes `metrics_by_month_{split}.csv`.
+- `scripts/check_field_center.py` now writes lead-binned cap diagnostics to `outputs/diagnostics/field_center_by_lead.csv`.
+
+### 18.1 Phase A Command
+
+Command:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\audit_data_coverage.py --config configs\finetune.yaml --max-cases-per-month 200
+```
+
+Result:
+
+```text
+PASS_WITH_BLOCKED_MONTHS
+```
+
+The script wrote:
+
+```text
+outputs/audit/aifs_inventory.csv
+outputs/audit/unparseable.csv
+outputs/audit/ibtracs_coverage.csv
+outputs/audit/aifs_truth_join.csv
+outputs/audit/monthly_alignment_check.csv
+outputs/audit/coverage_decision.json
+```
+
+### 18.2 AIFS And Truth Coverage
+
+`outputs/audit/aifs_truth_join.csv`:
+
+```text
+year_month,n_files,n_inits,lead_min,lead_max,n_leads_per_init_median,missing_leads_examples,truth,n_records,n_sids
+2024-04,1230,30,0,240,41.0,,MISSING,0,0
+2024-05,1271,31,0,240,41.0,,OK,56,2
+2024-06,1230,30,0,240,41.0,,OK,47,5
+2024-07,1271,31,0,240,41.0,,OK,171,8
+2024-08,1271,31,0,240,41.0,,OK,479,16
+2024-09,1230,30,0,240,41.0,,OK,409,21
+2024-10,1271,31,0,240,41.0,,OK,280,13
+2024-11,1230,30,0,240,41.0,,OK,244,10
+2024-12,1271,31,0,240,41.0,,OK,19,1
+2025-01,1271,31,0,240,41.0,,MISSING,0,0
+2025-02,1066,26,0,240,41.0,,MISSING,0,0
+2025-07,1271,31,0,240,41.0,,MISSING,0,0
+2025-08,1271,31,0,240,41.0,,MISSING,0,0
+```
+
+Notes:
+
+- AIFS months present on `G:/AIFS_PT`: `2024-04` through `2025-08` except `2025-03` through `2025-06`.
+- Each present month has full 6-hour lead coverage with median `41` leads per init (`0..240h`).
+- Current `data/ibtracs/georef.csv` covers only through 2024 and has no truth for 2025 months.
+- `2024-04` AIFS exists but has no truth in the configured IBTrACS CSV.
+
+### 18.3 Monthly Alignment Decision
+
+`outputs/audit/coverage_decision.json`:
+
+```json
+{
+  "truth_usable_months": ["2024-05", "2024-06", "2024-07", "2024-08", "2024-09", "2024-10", "2024-11", "2024-12"],
+  "truth_blocked_months": ["2024-04", "2025-01", "2025-02", "2025-07", "2025-08"],
+  "alignment_pass_months": ["2024-05", "2024-06", "2024-07", "2024-08", "2024-09", "2024-10", "2024-11"],
+  "alignment_blocked_months": ["2024-12"],
+  "blocked_months": ["2024-04", "2024-12", "2025-01", "2025-02", "2025-07", "2025-08"],
+  "recommended_data_usable_months": ["2024-05", "2024-06", "2024-07", "2024-08", "2024-09", "2024-10", "2024-11"]
+}
+```
+
+Interpretation:
+
+- `2024-05` through `2024-11` pass the monthly AIFS `.pt` alignment gate.
+- `2024-12` has truth, but the available storm is weak in AIFS: all checked short-lead candidates have `min100_hPa >= 1002.59 hPa`. It cannot serve as a reliable deep-low alignment gate month, so it is explicitly blocked from training/evaluation.
+- 2025 months are blocked only because truth is missing. They can be enabled later only after adding matching `ISO_TIME,SID,LAT,LON` truth rows to `data/ibtracs`.
+
+### 18.4 Alignment Evidence
+
+The first passing row for each alignment-passed month:
+
+```text
+year_month,sid,valid_time,lead_hour,msl_truth_hPa,min100_hPa,min100_dist_km,status
+2024-05,2024141N03142,2024-05-27T12:00:00+00:00,0,998.2,993.38,28.81,RELAXED_PASS
+2024-06,2024141N03142,2024-06-01T12:00:00+00:00,0,993.0875,992.7675,27.33,RELAXED_PASS
+2024-07,2024181N09320,2024-07-01T12:00:00+00:00,0,985.5591,985.5591,10.88,PASS
+2024-08,2024213N14254,2024-08-02T12:00:00+00:00,0,999.6781,999.0781,16.79,RELAXED_PASS
+2024-09,2024244N09137,2024-09-03T12:00:00+00:00,0,995.5358,993.8558,38.65,RELAXED_PASS
+2024-10,2024269N14150,2024-10-01T12:00:00+00:00,0,991.6519,991.0119,28.15,RELAXED_PASS
+2024-11,2024307N06143,2024-11-04T12:00:00+00:00,0,998.7762,998.7762,7.74,RELAXED_PASS
+```
+
+For `2024-12`, all checked short-lead candidates failed the pressure gate. The lowest `min100_hPa` was `1002.59 hPa`, so the month is blocked rather than used for training.
+
+### 18.5 Phase A Gate Conclusion
+
+Phase A passes with explicit blocked months.
+
+Allowed for Phase B/C/D:
+
+```text
+2024-05, 2024-06, 2024-07, 2024-08, 2024-09, 2024-10, 2024-11
+```
+
+Explicitly excluded:
+
+```text
+2024-04, 2024-12, 2025-01, 2025-02, 2025-07, 2025-08
+```
+
+Do not train or evaluate on 2025 AIFS data until 2025 truth is added. Do not train/evaluate on `2024-12` unless a separate manual decision accepts weak-system alignment validation for that month.
+
+### 18.6 Verification
+
+Commands:
+
+```powershell
+D:\study\envs\tc_loc\python.exe -m compileall tclocator scripts tests
+D:\study\envs\tc_loc\python.exe -c "import runpy; ns=runpy.run_path('tests/test_split.py'); ns['test_grouped_split_keeps_all_leads_of_init_together'](); ns['test_select_aifs_files_uses_same_deterministic_split'](); ns['test_year_month_group_uses_init_month'](); print('split tests ok')"
+```
+
+Results:
+
+```text
+compileall: passed
+split tests: passed
+```

@@ -19,10 +19,11 @@ from tclocator.common import DomainConfig, haversine_km, iter_files, load_config
 from tclocator.io_aifs import parse_aifs_filename, read_aifs_channels
 from tclocator.io_era5 import read_era5_channels
 from tclocator.labels import find_field_min_center, read_ibtracs, records_at_time
+from tclocator.split import filter_aifs_files_by_usable_months
 import pandas as pd
 
 
-LEAD_BINS = [(0, 24), (24, 48), (48, 96), (96, 120)]
+LEAD_BINS = [(0, 24), (24, 48), (48, 72), (72, 96), (96, 120)]
 
 
 def _output_dir(config: dict[str, Any]) -> Path:
@@ -99,7 +100,10 @@ def _real_displacements(config: dict[str, Any]) -> pd.DataFrame:
     """Collect true-vs-field msl-min displacements from AIFS files."""
 
     paths = config.get("paths", {})
-    aifs_files = iter_files(paths.get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"])
+    aifs_files = filter_aifs_files_by_usable_months(
+        config,
+        iter_files(paths.get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"]),
+    )
     ibtracs_path = Path(paths.get("ibtracs_csv", ""))
     if not aifs_files or not ibtracs_path.exists():
         return pd.DataFrame()

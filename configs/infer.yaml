@@ -1,8 +1,10 @@
 channels: ["msl", "vo_850", "t_500"]
 domain: {lat_min: 0.0, lat_max: 70.0, lon_min: 100.0, lon_max: 320.0, res: 0.25}
+data:
+  usable_months: ["2024-05", "2024-06", "2024-07", "2024-08", "2024-09", "2024-10", "2024-11"]
 paths:
   era5_dir: "F:/typhoon_loc/data/era5"
-  aifs_dir: "F:/typhoon_loc/data/aifs"
+  aifs_dir: "G:/AIFS_PT"
   ibtracs_csv: "F:/typhoon_loc/data/ibtracs/georef.csv"
   output_dir: "F:/typhoon_loc/outputs"
   norm_stats_era5: "F:/typhoon_loc/outputs/norm_stats_era5.json"

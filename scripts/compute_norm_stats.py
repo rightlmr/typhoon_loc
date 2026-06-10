@@ -18,6 +18,7 @@ from tclocator.dataset import SyntheticTCDataset
 from tclocator.io_aifs import read_aifs_channels
 from tclocator.io_era5 import read_era5_channels
 from tclocator.normalization import compute_norm_stats_stream, save_norm_stats
+from tclocator.split import filter_aifs_files_by_usable_months
 
 
 def _synthetic_samples(config: dict[str, Any]) -> list[np.ndarray]:
@@ -60,7 +61,10 @@ def _compute_aifs(config: dict[str, Any], *, smoke: bool) -> None:
         samples = _synthetic_samples(config)
         factory = lambda: iter(samples)
     else:
-        files = iter_files(paths.get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"])
+        files = filter_aifs_files_by_usable_months(
+            config,
+            iter_files(paths.get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"]),
+        )
         if not files:
             print("No AIFS files found; skipping AIFS normalization stats.")
             return

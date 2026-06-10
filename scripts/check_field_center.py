@@ -18,6 +18,10 @@ import pandas as pd
 
 from tclocator.common import DomainConfig, build_lat_lon, haversine_km, iter_files, load_config
 from tclocator.labels import find_field_min_center, read_ibtracs, records_at_time
+from tclocator.split import filter_aifs_files_by_usable_months
+
+
+LEAD_BINS = [(0, 24), (24, 48), (48, 72), (72, 96), (96, 120)]
 
 
 def _old_global_argmin_center(
@@ -45,7 +49,7 @@ def _collect_distances(
     old_radius_km: float,
     *,
     new_radius_km: float | None = None,
-) -> tuple[list[float], list[float], list[str]]:
+) -> tuple[list[float], list[float], list[str], list[int]]:
     """Collect old/new distances and descent stop reasons from short-lead AIFS fields."""
 
     paths = config.get("paths", {})
@@ -54,11 +58,15 @@ def _collect_distances(
     radius_km = float(new_radius_km if new_radius_km is not None else label_cfg.get("search_radius_km", 100.0))
     smooth_px = int(label_cfg.get("field_center_smooth_px", 0))
     lead_max = int(config.get("finetune", {}).get("lead_max", 24))
-    files = iter_files(paths.get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"])
+    files = filter_aifs_files_by_usable_months(
+        config,
+        iter_files(paths.get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"]),
+    )
     records = read_ibtracs(paths.get("ibtracs_csv", ""), config.get("ibtracs", {}).get("col_map", {}))
     old_distances: list[float] = []
     new_distances: list[float] = []
     stop_reasons: list[str] = []
+    lead_hours: list[int] = []
 
     for path in files:
         meta = parse_aifs_filename(path)
@@ -84,16 +92,17 @@ def _collect_distances(
             old_distances.append(float(haversine_km(true_lat, true_lon, old_lat, old_lon)))
             new_distances.append(float(haversine_km(true_lat, true_lon, new_lat, new_lon)))
             stop_reasons.append(str(stop_reason))
+            lead_hours.append(int(meta.forecast_hour))
             if len(new_distances) >= max_samples:
-                return old_distances, new_distances, stop_reasons
-    return old_distances, new_distances, stop_reasons
+                return old_distances, new_distances, stop_reasons, lead_hours
+    return old_distances, new_distances, stop_reasons, lead_hours
 
 
 def _scan_radii(config: dict[str, Any], max_samples: int, radii: list[float]) -> None:
     """Print median/p90 true-distance for several descent caps."""
 
     for radius in radii:
-        _, distances, _ = _collect_distances(config, max_samples, old_radius_km=500.0, new_radius_km=radius)
+        _, distances, _, _ = _collect_distances(config, max_samples, old_radius_km=500.0, new_radius_km=radius)
         if not distances:
             print(f"radius={radius:g}: no samples")
             continue
@@ -101,6 +110,43 @@ def _scan_radii(config: dict[str, Any], max_samples: int, radii: list[float]) ->
         p90 = float(np.quantile(distances, 0.90))
         lt100 = sum(value < 100.0 for value in distances)
         print(f"radius={radius:g}: median={median:.2f} km p90={p90:.2f} km lt100={lt100}/{len(distances)}")
+
+
+def _summarize_by_lead(
+    old_distances: list[float],
+    new_distances: list[float],
+    stop_reasons: list[str],
+    lead_hours: list[int],
+) -> pd.DataFrame:
+    """Return bounded-center diagnostics grouped by forecast lead bins."""
+
+    rows: list[dict[str, float | int | str]] = []
+    arrays = {
+        "old": np.asarray(old_distances, dtype=np.float64),
+        "new": np.asarray(new_distances, dtype=np.float64),
+        "lead": np.asarray(lead_hours, dtype=np.int64),
+        "reason": np.asarray(stop_reasons, dtype=object),
+    }
+    for lo, hi in LEAD_BINS:
+        mask = (arrays["lead"] >= lo) & (arrays["lead"] < hi)
+        if not np.any(mask):
+            continue
+        reasons = arrays["reason"][mask]
+        local_mask = reasons == "local_min"
+        cap_mask = reasons == "cap"
+        new_values = arrays["new"][mask]
+        rows.append(
+            {
+                "lead_bin": f"{lo:03d}-{hi:03d}",
+                "n": int(mask.sum()),
+                "cap_fraction": float(cap_mask.mean()),
+                "old_global_argmin_median_km": float(np.median(arrays["old"][mask])),
+                "new_local_descent_median_km": float(np.median(new_values)),
+                "median_dist_local_min_km": float(np.median(new_values[local_mask])) if np.any(local_mask) else float("nan"),
+                "median_dist_cap_km": float(np.median(new_values[cap_mask])) if np.any(cap_mask) else float("nan"),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def main() -> int:
@@ -118,7 +164,7 @@ def main() -> int:
         _scan_radii(config, args.max_samples, [50.0, 75.0, 100.0, 125.0, 150.0, 200.0, 250.0])
         return 0
 
-    old_distances, new_distances, stop_reasons = _collect_distances(config, args.max_samples, args.old_radius_km)
+    old_distances, new_distances, stop_reasons, lead_hours = _collect_distances(config, args.max_samples, args.old_radius_km)
     if not new_distances:
         print("No matching short-lead AIFS/IBTrACS samples found.")
         return 1
@@ -137,6 +183,14 @@ def main() -> int:
     print(f"new_local_descent: median_dist_to_truth={new_median:.2f} km (n={n})")
     print(f"stop_reason: local_min={local_min_count} cap={cap_count} cap_fraction={cap_fraction:.3f}")
     print(f"median_dist local_min={local_min_median:.2f} km cap={cap_median:.2f} km")
+    by_lead = _summarize_by_lead(old_distances, new_distances, stop_reasons, lead_hours)
+    if not by_lead.empty:
+        out_dir = Path(config.get("paths", {}).get("output_dir", ROOT / "outputs")) / "diagnostics"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / "field_center_by_lead.csv"
+        by_lead.to_csv(out_path, index=False)
+        print(f"Wrote {out_path}")
+        print(by_lead.to_string(index=False))
     passed = new_median < 100.0 and new_median < old_median * 0.5
     print("PASS" if passed else "FAIL")
     return 0 if passed else 2

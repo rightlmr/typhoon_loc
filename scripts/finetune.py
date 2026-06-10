@@ -21,7 +21,7 @@ from tclocator.dataset import FieldDataset, FieldSample, SyntheticTCDataset, bui
 from tclocator.losses import LossConfig, TCLocatorLoss
 from tclocator.model import build_model_from_config
 from tclocator.normalization import load_norm_stats
-from tclocator.split import grouped_split, split_config
+from tclocator.split import filter_aifs_files_by_usable_months, grouped_split, split_config, split_val_groups_override
 from scripts.pretrain import _center_mae_km
 
 
@@ -90,7 +90,10 @@ def _train(model: torch.nn.Module, train_loader: DataLoader, val_loader: DataLoa
 def _real_dataset(config: dict[str, Any]) -> tuple[FieldDataset, list[FieldSample]] | None:
     """Build real AIFS fine-tuning dataset."""
 
-    files = iter_files(config.get("paths", {}).get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"])
+    files = filter_aifs_files_by_usable_months(
+        config,
+        iter_files(config.get("paths", {}).get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"]),
+    )
     if not files:
         print("No AIFS files found; fine-tuning skipped.")
         return None
@@ -151,7 +154,13 @@ def main() -> int:
             return 0
         dataset, samples = real
         group_by, val_fraction, split_seed = split_config(config, "init_time")
-        train_idx, val_idx, val_groups = grouped_split(samples, group_by=group_by, val_fraction=val_fraction, seed=split_seed)
+        train_idx, val_idx, val_groups = grouped_split(
+            samples,
+            group_by=group_by,
+            val_fraction=val_fraction,
+            seed=split_seed,
+            val_groups_override=split_val_groups_override(config),
+        )
         _write_aifs_split_record(config, group_by, val_fraction, split_seed, val_groups)
         if not train_idx or not val_idx:
             print(f"Invalid AIFS split: train n={len(train_idx)} val n={len(val_idx)} val_groups={val_groups}")

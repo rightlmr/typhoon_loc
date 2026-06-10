@@ -16,6 +16,7 @@ from tclocator.dataset import SyntheticTCDataset, label_cache_path, parse_era5_v
 from tclocator.io_aifs import parse_aifs_filename, read_aifs_channels
 from tclocator.io_era5 import read_era5_channels
 from tclocator.labels import generate_labels, read_ibtracs, records_at_time, save_label_npz
+from tclocator.split import filter_aifs_files_by_usable_months
 import pandas as pd
 
 
@@ -77,7 +78,10 @@ def _build_aifs(config: dict[str, Any]) -> None:
     """Build AIFS label caches."""
 
     paths = config.get("paths", {})
-    files = iter_files(paths.get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"])
+    files = filter_aifs_files_by_usable_months(
+        config,
+        iter_files(paths.get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"]),
+    )
     ibtracs_path = Path(paths.get("ibtracs_csv", ""))
     if not files or not ibtracs_path.exists():
         print("No AIFS/IBTrACS data found; skipping AIFS label cache.")

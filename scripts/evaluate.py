@@ -86,6 +86,7 @@ def _build_references(config: dict[str, Any], split: str) -> pd.DataFrame:
                     "ISO_TIME": meta.valid_time.isoformat(),
                     "SID": record["SID"],
                     "LEAD_HOUR": meta.forecast_hour,
+                    "YEAR_MONTH": meta.init_time.strftime("%Y-%m"),
                     "LAT_TRUE": lat_true,
                     "LON_TRUE": lon_true,
                     "LAT_FIELD": lat_field,
@@ -101,6 +102,40 @@ def _with_split_suffix(path: Path, split: str) -> Path:
     if split == "all":
         return path
     return path.with_name(f"{path.stem}_{split}{path.suffix}")
+
+
+def _attach_reference_month(matched: pd.DataFrame, references: pd.DataFrame) -> pd.DataFrame:
+    """Attach AIFS initialization month to matched rows."""
+
+    if matched.empty or "YEAR_MONTH" not in references.columns:
+        return matched
+    ref_months = references[["ISO_TIME", "SID", "LEAD_HOUR", "YEAR_MONTH"]].copy()
+    ref_months["ISO_TIME"] = pd.to_datetime(ref_months["ISO_TIME"], utc=True, errors="coerce")
+    ref_months["LEAD_HOUR"] = pd.to_numeric(ref_months["LEAD_HOUR"], errors="coerce").astype("Int64")
+    out = matched.copy()
+    out["ISO_TIME"] = pd.to_datetime(out["ISO_TIME"], utc=True, errors="coerce")
+    out["LEAD_HOUR"] = pd.to_numeric(out["LEAD_HOUR"], errors="coerce").astype("Int64")
+    return out.merge(ref_months, on=["ISO_TIME", "SID", "LEAD_HOUR"], how="left")
+
+
+def _summarize_by_month(matched: pd.DataFrame) -> pd.DataFrame:
+    """Summarize matched metrics by AIFS initialization month."""
+
+    rows: list[dict[str, Any]] = []
+    if matched.empty or "YEAR_MONTH" not in matched.columns:
+        return pd.DataFrame(rows)
+    for year_month, part in matched.groupby("YEAR_MONTH"):
+        rows.append(
+            {
+                "year_month": str(year_month),
+                "n_ref": int(len(part)),
+                "recall": float(part["hit"].mean()),
+                "loc_error_median_km": float(part["loc_error_km"].median(skipna=True)),
+                "track_bias_median_km": float(part["track_bias_km"].median(skipna=True)),
+                "end2end_median_km": float(part["end2end_km"].median(skipna=True)),
+            }
+        )
+    return pd.DataFrame(rows).sort_values("year_month").reset_index(drop=True)
 
 
 def main() -> int:
@@ -128,18 +163,23 @@ def main() -> int:
             return 0
 
     matched = match_predictions(predictions, references)
+    matched = _attach_reference_month(matched, references)
     summary = summarize_by_lead(matched)
+    by_month = _summarize_by_month(matched)
     pr = precision_recall_curve(predictions, references, thresholds=[0.1, 0.2, 0.3, 0.5, 0.7])
     out_dir = Path(config.get("paths", {}).get("output_dir", ROOT / "outputs"))
     out_dir.mkdir(parents=True, exist_ok=True)
     matched_path = _with_split_suffix(out_dir / "matched_metrics.csv", args.split)
     summary_path = _with_split_suffix(out_dir / "metrics_by_lead.csv", args.split)
+    month_path = _with_split_suffix(out_dir / "metrics_by_month.csv", args.split)
     pr_path = _with_split_suffix(out_dir / "precision_recall.csv", args.split)
     matched.to_csv(matched_path, index=False)
     summary.to_csv(summary_path, index=False)
+    by_month.to_csv(month_path, index=False)
     pr.to_csv(pr_path, index=False)
     print(f"Wrote {matched_path}")
     print(f"Wrote {summary_path}")
+    print(f"Wrote {month_path}")
     print(f"Wrote {pr_path}")
     return 0
 

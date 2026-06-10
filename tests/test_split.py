@@ -67,3 +67,12 @@ def test_select_aifs_files_uses_same_deterministic_split() -> None:
     assert sorted(train_files + val_files) == sorted(files)
     assert len(train_files) == 2
     assert len(val_files) == 2
+
+
+def test_year_month_group_uses_init_month() -> None:
+    """A long lead crossing month-end should still group by init month."""
+
+    sample = _sample("a_120.pt", "2024-04-30T12:00:00Z", 120)
+
+    assert sample.valid_time.strftime("%Y-%m") == "2024-05"
+    assert sample_group_id(sample, "year_month") == "2024-04"
