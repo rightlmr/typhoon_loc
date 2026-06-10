@@ -82,6 +82,17 @@ DEFAULT_TENSOR_CHANNEL_ORDER = [
 ]
 
 
+def _torch_load_aifs_tensor(path: str | Path) -> Any:
+    """Load an AIFS tensor payload, preferring memory mapping when available."""
+
+    try:
+        return torch.load(path, map_location="cpu", mmap=True)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
+    except RuntimeError:
+        return torch.load(path, map_location="cpu")
+
+
 def _canonical_name(internal_name: str) -> str:
     """Normalize common internal aliases."""
 
@@ -154,7 +165,7 @@ def read_aifs_pt_variable(
     key = _canonical_name(internal_name)
     if key not in order:
         raise KeyError(f"AIFS tensor channel not configured: {internal_name}; available={order}")
-    tensor = torch.load(path, map_location="cpu")
+    tensor = _torch_load_aifs_tensor(path)
     if isinstance(tensor, dict):
         for candidate in ("tensor", "data", "field", "fields"):
             if candidate in tensor:

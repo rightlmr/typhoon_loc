@@ -96,7 +96,12 @@ def _synthetic_displacements() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _real_displacements(config: dict[str, Any]) -> pd.DataFrame:
+def _real_displacements(
+    config: dict[str, Any],
+    *,
+    lead_max: int | None = None,
+    progress_every: int = 200,
+) -> pd.DataFrame:
     """Collect true-vs-field msl-min displacements from AIFS files."""
 
     paths = config.get("paths", {})
@@ -114,11 +119,17 @@ def _real_displacements(config: dict[str, Any]) -> pd.DataFrame:
     smooth_px = int(labels_cfg.get("field_center_smooth_px", 0))
     records = read_ibtracs(ibtracs_path, config.get("ibtracs", {}).get("col_map", {}))
     rows: list[dict[str, Any]] = []
+    processed = 0
     for path in aifs_files:
         meta = parse_aifs_filename(path)
+        if lead_max is not None and meta.forecast_hour > lead_max:
+            continue
         at_time = records_at_time(records, pd.Timestamp(meta.valid_time))
         if at_time.empty:
             continue
+        processed += 1
+        if progress_every > 0 and processed % progress_every == 0:
+            print(f"phase0 processed_fields={processed} rows={len(rows)}", flush=True)
         field, _ = read_aifs_channels(path, channels=["msl"], domain=domain, aifs_config=config.get("aifs", {}))
         msl = field[0]
         for _, record in at_time.iterrows():
@@ -261,13 +272,19 @@ def main() -> int:
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=str(ROOT / "configs" / "finetune.yaml"))
+    parser.add_argument("--lead-max", type=int, default=120)
+    parser.add_argument("--progress-every", type=int, default=200)
     parser.add_argument("--smoke-synthetic", action="store_true")
     args = parser.parse_args()
 
     config = load_config(args.config)
     out_dir = _output_dir(config)
     vo_result = {"status": "synthetic_smoke"} if args.smoke_synthetic else _vo_consistency(config)
-    df = _synthetic_displacements() if args.smoke_synthetic else _real_displacements(config)
+    df = (
+        _synthetic_displacements()
+        if args.smoke_synthetic
+        else _real_displacements(config, lead_max=int(args.lead_max), progress_every=int(args.progress_every))
+    )
     if df.empty:
         print("Phase 0 displacement skipped: no AIFS/IBTrACS data found.")
     else:

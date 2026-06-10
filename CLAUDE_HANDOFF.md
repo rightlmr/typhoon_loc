@@ -1484,6 +1484,129 @@ compileall: passed
 split tests: passed
 ```
 
+## 19. Step 4 Phase B Aligned Displacement And Cap Diagnostics
+
+Phase B is complete on the Phase A usable months only:
+
+```text
+2024-05, 2024-06, 2024-07, 2024-08, 2024-09, 2024-10, 2024-11
+```
+
+No blocked month was used.
+
+Additional code changes made during Phase B:
+
+- `scripts/phase0_consistency_and_displacement.py` accepts `--lead-max` and progress logging, and was run at `--lead-max 120`.
+- `scripts/check_field_center.py` accepts `--lead-max` and progress logging, and was run at `--lead-max 120`.
+- `tclocator/io_aifs.py` now uses `torch.load(..., mmap=True)` when supported, with fallback to normal `torch.load`. This is an I/O performance change only; it does not change `.pt` orientation, channel order, vorticity, normalization, labels, model, loss, or decode logic.
+- `scripts/check_aifs_alignment.py` was rerun after the mmap change and still passed with the same Yagi lead-0 values.
+
+### 19.1 Alignment Regression Check
+
+Command:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\check_aifs_alignment.py --config configs\finetune.yaml
+```
+
+Output:
+
+```text
+2024244N09137 valid=2024-09-07T12:00:00 truth=(21.00,106.00) msl_truth_hPa=982.95 min100_hPa=981.59 min100=(21.25,106.00) min100_dist_km=27.80 PASS
+PASS
+```
+
+### 19.2 Displacement Vs Lead
+
+Command:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\phase0_consistency_and_displacement.py --config configs\finetune.yaml --lead-max 120 --progress-every 200
+```
+
+Progress completed through `processed_fields=3200 rows=8605`.
+
+Output:
+
+```text
+Wrote F:\typhoon_loc\outputs\phase0\displacement_vs_lead.csv
+Wrote F:\typhoon_loc\outputs\phase0\displacement_summary_by_lead.csv
+Wrote F:\typhoon_loc\outputs\phase0\displacement_vs_lead.png
+vo_850 consistency: {'status': 'precomputed_vo850_without_uv', 'message': 'ERA5 只有预计算 vo_850，缺少 u850/v850，无法自动验证 D5 口径一致性', 'error': "KeyError: 'ERA5 variable not found in dataset: u850'", 'pass': False}
+建议 labels.mode = in_field
+建议 finetune.lead_max = 48
+建议 labels.search_radius_km = 100
+```
+
+`outputs/phase0/displacement_summary_by_lead.csv`:
+
+```text
+lead_bin,n,mean_km,median_km,p75_km,p90_km
+000-024,1686,39.66374268977234,33.844046297660455,56.364362750610425,78.37871028789431
+024-048,1686,57.14054762905627,58.68052638498072,79.88665521206742,90.20761000221628
+048-072,1686,68.5063172508479,75.62983201911334,87.13710707079926,94.73458656574616
+072-096,1686,73.87418069042869,79.05801236499545,88.95594131564711,95.13083888085572
+096-120,1686,75.22451963059538,79.18061592992073,89.07203822180401,95.1121651594571
+```
+
+Interpretation:
+
+- `0-24h` and `24-48h` remain under the ~75 km median threshold.
+- `48-72h` is slightly above the threshold at `75.63 km`; later bins remain near `79 km`.
+- Phase0 therefore recommends `labels.mode = in_field` and `finetune.lead_max = 48`.
+
+### 19.3 Cap Statistics By Lead
+
+Command:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\check_field_center.py --config configs\finetune.yaml --lead-max 120 --max-samples 20000 --progress-every 200
+```
+
+The script processed all available matching samples under 120h:
+
+```text
+old_global_argmin: median_dist_to_truth=110.18 km (n=8854)
+new_local_descent: median_dist_to_truth=71.94 km (n=8854)
+stop_reason: local_min=5027 cap=3827 cap_fraction=0.432
+median_dist local_min=46.18 km cap=82.38 km
+```
+
+The legacy overall PASS criterion returned `FAIL` because the old global-argmin median on aligned data is no longer more than 2x worse than local descent. For Step 4, the required evidence is the lead-binned cap table below, which was written successfully.
+
+`outputs/diagnostics/field_center_by_lead.csv`:
+
+```text
+lead_bin,n,cap_fraction,old_global_argmin_median_km,new_local_descent_median_km,median_dist_local_min_km,median_dist_cap_km
+000-024,1686,0.0771055753262159,38.77614337038442,33.844046297660455,31.63539091034072,81.9870435051914
+024-048,1686,0.21233689205219455,67.1484549551124,58.68052638498072,47.850761593725366,82.73160590977032
+048-072,1686,0.4543297746144721,112.31595337726954,75.62983201911334,56.549958653925806,83.28366894066943
+072-096,1686,0.6287069988137604,160.2056485057286,79.05801236499545,61.077357986699596,83.0162008209699
+096-120,1686,0.7147093712930012,223.8744177820961,79.18061592992073,61.762743868369384,81.4739899425099
+```
+
+Interpretation:
+
+- Cap fraction is low for `0-24h` (`0.077`) and moderate for `24-48h` (`0.212`).
+- Cap fraction exceeds `0.40` from `48-72h` onward and reaches `0.715` at `96-120h`.
+- Per Step 4 rules, this marks long-lead in-field labeling as the baseline route, while `vo_850` hybrid center judging should be left as a separate Step 5 variable.
+
+### 19.4 Phase B Decision
+
+Phase B decision:
+
+```text
+labels.mode = in_field
+finetune.lead_max = 48
+labels.search_radius_km = 100
+```
+
+Rationale:
+
+- `ibtracs` remains appropriate for short-lead Phase C because Step 3 already proved short-lead performance and Phase C must change only data scale.
+- For long-lead extension, aligned displacement crosses the ~75 km median threshold immediately after 48h and cap_fraction becomes high, so direct IBTrACS labels should not be used for long lead.
+- Because long-lead cap_fraction is high, Step 5 should consider a vo_850 hybrid center criterion, but Step 4 must not implement it.
+
 ## 18. Step 4 Phase A Data Coverage And Alignment Gate
 
 Step 4 started from `D:\downloads\STEP4_SCALE_DATA.md`. Phase A-0/A is complete. No downstream retraining was run before the coverage and monthly alignment gate.

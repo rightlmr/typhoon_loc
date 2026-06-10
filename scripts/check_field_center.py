@@ -49,6 +49,8 @@ def _collect_distances(
     old_radius_km: float,
     *,
     new_radius_km: float | None = None,
+    lead_max: int | None = None,
+    progress_every: int = 200,
 ) -> tuple[list[float], list[float], list[str], list[int]]:
     """Collect old/new distances and descent stop reasons from short-lead AIFS fields."""
 
@@ -57,7 +59,7 @@ def _collect_distances(
     label_cfg = config.get("labels", {})
     radius_km = float(new_radius_km if new_radius_km is not None else label_cfg.get("search_radius_km", 100.0))
     smooth_px = int(label_cfg.get("field_center_smooth_px", 0))
-    lead_max = int(config.get("finetune", {}).get("lead_max", 24))
+    active_lead_max = int(lead_max if lead_max is not None else config.get("finetune", {}).get("lead_max", 24))
     files = filter_aifs_files_by_usable_months(
         config,
         iter_files(paths.get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"]),
@@ -68,13 +70,17 @@ def _collect_distances(
     stop_reasons: list[str] = []
     lead_hours: list[int] = []
 
+    processed = 0
     for path in files:
         meta = parse_aifs_filename(path)
-        if meta.forecast_hour > lead_max:
+        if meta.forecast_hour > active_lead_max:
             continue
         at_time = records_at_time(records, pd.Timestamp(meta.valid_time))
         if at_time.empty:
             continue
+        processed += 1
+        if progress_every > 0 and processed % progress_every == 0:
+            print(f"field_center processed_fields={processed} samples={len(new_distances)}", flush=True)
         field, _ = read_aifs_channels(path, channels=["msl"], domain=domain, aifs_config=config.get("aifs", {}))
         for _, record in at_time.iterrows():
             true_lat = float(record["LAT"])
@@ -98,11 +104,18 @@ def _collect_distances(
     return old_distances, new_distances, stop_reasons, lead_hours
 
 
-def _scan_radii(config: dict[str, Any], max_samples: int, radii: list[float]) -> None:
+def _scan_radii(config: dict[str, Any], max_samples: int, radii: list[float], *, lead_max: int | None = None) -> None:
     """Print median/p90 true-distance for several descent caps."""
 
     for radius in radii:
-        _, distances, _, _ = _collect_distances(config, max_samples, old_radius_km=500.0, new_radius_km=radius)
+        _, distances, _, _ = _collect_distances(
+            config,
+            max_samples,
+            old_radius_km=500.0,
+            new_radius_km=radius,
+            lead_max=lead_max,
+            progress_every=0,
+        )
         if not distances:
             print(f"radius={radius:g}: no samples")
             continue
@@ -156,15 +169,23 @@ def main() -> int:
     parser.add_argument("--config", default=str(ROOT / "configs" / "finetune.yaml"))
     parser.add_argument("--max-samples", type=int, default=200)
     parser.add_argument("--old-radius-km", type=float, default=500.0)
+    parser.add_argument("--lead-max", type=int, default=None)
+    parser.add_argument("--progress-every", type=int, default=200)
     parser.add_argument("--scan-radii", action="store_true")
     args = parser.parse_args()
 
     config = load_config(args.config)
     if args.scan_radii:
-        _scan_radii(config, args.max_samples, [50.0, 75.0, 100.0, 125.0, 150.0, 200.0, 250.0])
+        _scan_radii(config, args.max_samples, [50.0, 75.0, 100.0, 125.0, 150.0, 200.0, 250.0], lead_max=args.lead_max)
         return 0
 
-    old_distances, new_distances, stop_reasons, lead_hours = _collect_distances(config, args.max_samples, args.old_radius_km)
+    old_distances, new_distances, stop_reasons, lead_hours = _collect_distances(
+        config,
+        args.max_samples,
+        args.old_radius_km,
+        lead_max=args.lead_max,
+        progress_every=int(args.progress_every),
+    )
     if not new_distances:
         print("No matching short-lead AIFS/IBTrACS samples found.")
         return 1
