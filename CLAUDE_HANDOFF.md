@@ -1484,6 +1484,233 @@ compileall: passed
 split tests: passed
 ```
 
+## 20. Step 4 Phase C Short-Lead Scaled Retrain
+
+Phase C was run after Phase A/B using only the Phase A usable AIFS months:
+
+```text
+2024-05, 2024-06, 2024-07, 2024-08, 2024-09, 2024-10, 2024-11
+```
+
+Configuration for Phase C:
+
+```text
+labels.mode = ibtracs
+finetune.lead_max = 24
+split.group_by = year_month
+split.val_groups_override = ["2024-08", "2024-10"]
+finetune.freeze_encoder = true
+```
+
+Commands run:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\compute_norm_stats.py --config configs\finetune.yaml --domain aifs
+D:\study\envs\tc_loc\python.exe scripts\build_label_cache.py --config configs\finetune.yaml --domain aifs
+D:\study\envs\tc_loc\python.exe scripts\finetune.py --config configs\finetune.yaml
+D:\study\envs\tc_loc\python.exe scripts\predict.py --config configs\infer.yaml --domain aifs --split val
+D:\study\envs\tc_loc\python.exe scripts\evaluate.py --config configs\infer.yaml --split val --predictions outputs\predictions_val.csv
+D:\study\envs\tc_loc\python.exe scripts\predict.py --config configs\infer.yaml --domain aifs --split train
+D:\study\envs\tc_loc\python.exe scripts\evaluate.py --config configs\infer.yaml --split train --predictions outputs\predictions_train.csv
+```
+
+Training split and curve:
+
+```text
+AIFS split group_by=year_month train n=760 val n=310 val_groups=['2024-08', '2024-10']
+epoch=1 train_loss=1.0928 val_center_mae_km=49.64
+epoch=2 train_loss=0.9121 val_center_mae_km=54.49
+epoch=3 train_loss=0.8621 val_center_mae_km=59.61
+epoch=4 train_loss=0.8162 val_center_mae_km=57.72
+epoch=5 train_loss=0.7748 val_center_mae_km=59.70
+epoch=6 train_loss=0.7235 val_center_mae_km=68.41
+epoch=7 train_loss=0.6847 val_center_mae_km=69.19
+epoch=8 train_loss=0.6477 val_center_mae_km=71.50
+epoch=9 train_loss=0.6071 val_center_mae_km=71.32
+```
+
+Phase C validation metrics (`outputs/m4_phaseC_lead24_baseline/metrics_by_lead_val.csv`):
+
+```text
+lead_bin,n_ref,recall,loc_error_median_km,track_bias_median_km,end2end_median_km
+000-024,760,0.6578947368421053,38.74313233075392,0.0,38.74313233075392
+024-048,762,0.42650918635170604,68.27191034965425,0.0,68.27191034965425
+048-096,1524,0.18110236220472442,126.62751666804043,0.0,126.62751666804043
+096-120,753,0.0849933598937583,212.06335748378166,0.0,212.06335748378166
+```
+
+Phase C train metrics:
+
+```text
+lead_bin,n_ref,recall,loc_error_median_km,track_bias_median_km,end2end_median_km
+000-024,926,0.8034557235421166,33.2808307705589,0.0,33.2808307705589
+024-048,924,0.5443722943722944,55.02913416701193,0.0,55.02913416701193
+048-096,1848,0.1985930735930736,117.43209961139458,0.0,117.43209961139458
+096-120,933,0.08467309753483387,213.0160730928539,0.0,213.0160730928539
+```
+
+Phase C gate conclusion:
+
+```text
+PASS
+```
+
+Rationale:
+
+- Short-lead validation `000-024` median end-to-end error is `38.74 km`, below the 70 km gate used in this project.
+- Short-lead validation recall is `0.658`, above the 0.5 gate.
+- Held-out months do not collapse: August `40.69 km` / recall `0.627`, October `35.22 km` / recall `0.711`.
+
+Phase C artifacts were copied to:
+
+```text
+outputs/m4_phaseC_lead24_baseline/
+```
+
+## 21. Step 4 Phase D Long-Lead In-Field Retrain
+
+Phase D used the Phase B long-lead decision as the only intentional label/lead change from Phase C.
+
+Configuration for Phase D:
+
+```text
+labels.mode = in_field
+finetune.lead_max = 120
+labels.search_radius_km = 100
+split.group_by = year_month
+split.val_groups_override = ["2024-08", "2024-10"]
+finetune.freeze_encoder = true
+train.num_workers = 0
+train.log_every_batches = 400
+```
+
+Runtime notes:
+
+- The first Phase D run with `train.num_workers=2` failed in a Windows DataLoader worker with `MemoryError` during `calc_vo850()`.
+- This was a worker memory/process-pressure issue, not a CUDA OOM. The failing traceback showed a `numpy.core._exceptions._ArrayMemoryError` while allocating a small gradient temporary array.
+- The fix was to set `train.num_workers=0`, keeping model, loss, decode, field center, and vorticity algorithms unchanged.
+- `scripts/finetune.py` now saves the best checkpoint immediately after each validation improvement and supports `train.log_every_batches` for long real-data runs.
+
+Commands run:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\build_label_cache.py --config configs\finetune.yaml --domain aifs
+D:\study\envs\tc_loc\python.exe scripts\finetune.py --config configs\finetune.yaml
+D:\study\envs\tc_loc\python.exe scripts\predict.py --config configs\infer.yaml --domain aifs --split val
+D:\study\envs\tc_loc\python.exe scripts\evaluate.py --config configs\infer.yaml --split val --predictions outputs\predictions_val.csv
+D:\study\envs\tc_loc\python.exe scripts\predict.py --config configs\infer.yaml --domain aifs --split train
+D:\study\envs\tc_loc\python.exe scripts\evaluate.py --config configs\infer.yaml --split train --predictions outputs\predictions_train.csv
+```
+
+Training split and curve:
+
+```text
+AIFS split group_by=year_month train n=3192 val n=1302 val_groups=['2024-08', '2024-10']
+epoch=1 train_loss=1.1047 val_center_mae_km=121.00
+epoch=2 train_loss=0.9520 val_center_mae_km=113.31
+epoch=3 train_loss=0.8597 val_center_mae_km=127.69
+epoch=4 train_loss=0.7759 val_center_mae_km=111.72
+epoch=5 train_loss=0.7019 val_center_mae_km=131.81
+epoch=6 train_loss=0.6323 val_center_mae_km=141.63
+epoch=7 train_loss=0.5768 val_center_mae_km=166.68
+epoch=8 train_loss=0.5190 val_center_mae_km=182.88
+epoch=9 train_loss=0.4652 val_center_mae_km=151.15
+epoch=10 train_loss=0.4179 val_center_mae_km=147.48
+epoch=11 train_loss=0.3800 val_center_mae_km=208.95
+epoch=12 train_loss=0.3440 val_center_mae_km=176.09
+```
+
+Best checkpoint:
+
+```text
+outputs/finetune_best.ckpt
+best epoch = 4
+best val_center_mae_km = 111.72
+```
+
+Phase D validation metrics (`outputs/metrics_by_lead_val.csv`):
+
+```text
+lead_bin,n_ref,recall,loc_error_median_km,track_bias_median_km,end2end_median_km
+000-024,760,0.6960526315789474,26.901683822564014,30.893614518347572,41.67780291017181
+024-048,762,0.65748031496063,27.79636372125148,55.45486552225859,69.93114192358084
+048-096,1524,0.4494750656167979,69.03655479954406,77.55138916749934,134.6083091745813
+096-120,753,0.300132802124834,138.99918690274026,79.99888350441337,201.875570731127
+```
+
+Phase D train metrics (`outputs/metrics_by_lead_train.csv`):
+
+```text
+lead_bin,n_ref,recall,loc_error_median_km,track_bias_median_km,end2end_median_km
+000-024,926,0.908207343412527,25.345536823324803,37.908936914515884,38.87976152307055
+024-048,924,0.8917748917748918,25.766761009923528,62.4667662782076,61.04620239653988
+048-096,1848,0.7997835497835498,27.794947261061484,77.93900095000073,84.15285740266657
+096-120,933,0.7009646302250804,37.776942862100356,78.6821913642163,94.64524627521425
+```
+
+Phase C vs Phase D validation comparison (`outputs/compare_phaseC_phaseD_by_lead_val.csv`):
+
+```text
+lead_bin,recall_phaseC,recall_phaseD,recall_delta,end2end_phaseC,end2end_phaseD,end2end_delta,end2end_rel_change
+000-024,0.6579,0.6961,0.0382,38.7431,41.6778,2.9347,0.0757
+024-048,0.4265,0.6575,0.2310,68.2719,69.9311,1.6592,0.0243
+048-096,0.1811,0.4495,0.2684,126.6275,134.6083,7.9808,0.0630
+096-120,0.0850,0.3001,0.2151,212.0634,201.8756,-10.1878,-0.0480
+```
+
+Phase D gate conclusion:
+
+```text
+PASS for Step 4 Phase D gate, but with clear overfitting warning.
+```
+
+Rationale:
+
+- Short-lead validation `000-024` end-to-end median increased from `38.74 km` to `41.68 km`, a `7.6%` regression, under the Step 4 `15%` maximum regression gate.
+- `024-048` end-to-end median changed from `68.27 km` to `69.93 km`, a `2.4%` regression.
+- Long-lead recall improved materially: `096-120` recall increased from `0.085` to `0.300`, and `096-120` end-to-end median improved from `212.06 km` to `201.88 km`.
+- Local detection error improved in every validation bin, but tracking bias appears in Phase D because the model now emits more long-lead detections and the current tracker links them with nonzero displacement error.
+- The training curve overfits after epoch 4; keep the epoch-4 best checkpoint and do not use later weights.
+
+Phase D artifacts were copied to:
+
+```text
+outputs/m4_phaseD_lead120_infield/
+```
+
+## 22. Current State After Step 4 Phase D
+
+Current committed-or-to-commit code/config state:
+
+- `configs/finetune.yaml` and `configs/infer.yaml` are currently set for the Phase D configuration: `labels.mode: "in_field"`, `finetune.lead_max: 120`, AIFS dir `G:/AIFS_PT`, usable months May-Nov 2024, and validation months August/October 2024.
+- `scripts/finetune.py` now writes best checkpoints immediately and supports `train.log_every_batches`.
+- `scripts/evaluate.py` writes `metrics_by_month_lead_{split}.csv` in addition to the earlier outputs.
+- `scripts/predict.py` prints AIFS progress every 200 files.
+- AIFS `.pt` channel reading now loads each tensor once per file for multi-channel reads.
+- `build_label_cache.py` reads only `msl` when building AIFS labels, avoiding unnecessary channel/vorticity work during label-cache generation.
+
+Recommended next technical step:
+
+- Step 5 should focus on reducing the Phase D tracking bias and overfitting without changing D1-D6. The most direct candidates are tracker calibration by lead and/or the previously deferred `vo_850` hybrid field-center criterion. Do not introduce a block-detection paradigm.
+
+Verification after Phase D:
+
+```powershell
+D:\study\envs\tc_loc\python.exe -m compileall tclocator scripts tests
+D:\study\envs\tc_loc\python.exe -m pytest -q
+```
+
+Results:
+
+```text
+compileall: passed
+pytest: 9 passed in 10.15s
+```
+
+Environment note:
+
+- `pytest` is declared in `requirements.txt` but was missing from the local `tc_loc` environment. It was installed with `D:\study\envs\tc_loc\python.exe -m pip install pytest` before running tests.
+
 ## 19. Step 4 Phase B Aligned Displacement And Cap Diagnostics
 
 Phase B is complete on the Phase A usable months only:

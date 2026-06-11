@@ -16,6 +16,7 @@ import numpy as np
 from tclocator.common import DomainConfig, iter_files, load_config
 from tclocator.dataset import SyntheticTCDataset
 from tclocator.io_aifs import read_aifs_channels
+from tclocator.io_aifs import parse_aifs_filename
 from tclocator.io_era5 import read_era5_channels
 from tclocator.normalization import compute_norm_stats_stream, save_norm_stats
 from tclocator.split import filter_aifs_files_by_usable_months
@@ -65,12 +66,18 @@ def _compute_aifs(config: dict[str, Any], *, smoke: bool) -> None:
             config,
             iter_files(paths.get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"]),
         )
+        lead_max = config.get("finetune", {}).get("lead_max")
+        if lead_max is not None:
+            max_hour = int(lead_max)
+            files = [path for path in files if parse_aifs_filename(path).forecast_hour <= max_hour]
         if not files:
             print("No AIFS files found; skipping AIFS normalization stats.")
             return
 
         def factory() -> Any:
-            for path in files:
+            for index, path in enumerate(files, start=1):
+                if index % 200 == 0:
+                    print(f"norm_stats aifs processed={index}/{len(files)}", flush=True)
                 yield read_aifs_channels(path, channels=config["channels"], domain=domain, aifs_config=config.get("aifs", {}))[0]
 
     stats = compute_norm_stats_stream(factory, config["channels"], config.get("norm", {}))

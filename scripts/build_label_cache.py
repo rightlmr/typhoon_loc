@@ -82,6 +82,10 @@ def _build_aifs(config: dict[str, Any]) -> None:
         config,
         iter_files(paths.get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"]),
     )
+    lead_max = config.get("finetune", {}).get("lead_max")
+    if lead_max is not None:
+        max_hour = int(lead_max)
+        files = [path for path in files if parse_aifs_filename(path).forecast_hour <= max_hour]
     ibtracs_path = Path(paths.get("ibtracs_csv", ""))
     if not files or not ibtracs_path.exists():
         print("No AIFS/IBTrACS data found; skipping AIFS label cache.")
@@ -90,9 +94,9 @@ def _build_aifs(config: dict[str, Any]) -> None:
     records = read_ibtracs(ibtracs_path, config.get("ibtracs", {}).get("col_map", {}))
     for path in files:
         meta = parse_aifs_filename(path)
-        field, _ = read_aifs_channels(path, channels=config["channels"], domain=domain, aifs_config=config.get("aifs", {}))
+        field, _ = read_aifs_channels(path, channels=["msl"], domain=domain, aifs_config=config.get("aifs", {}))
         label = generate_labels(
-            msl=field[config["channels"].index("msl")],
+            msl=field[0],
             records=records_at_time(records, pd.Timestamp(meta.valid_time)),
             domain=domain,
             label_config=config.get("labels", {}),

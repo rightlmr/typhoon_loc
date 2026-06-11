@@ -17,7 +17,7 @@ import pandas as pd
 
 from tclocator.common import DomainConfig, iter_files, load_config
 from tclocator.labels import find_field_min_center, read_ibtracs, records_at_time
-from tclocator.metrics import match_predictions, precision_recall_curve, summarize_by_lead
+from tclocator.metrics import DEFAULT_LEAD_BINS, match_predictions, precision_recall_curve, summarize_by_lead
 from tclocator.split import select_aifs_files
 
 
@@ -138,6 +138,31 @@ def _summarize_by_month(matched: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("year_month").reset_index(drop=True)
 
 
+def _summarize_by_month_lead(matched: pd.DataFrame) -> pd.DataFrame:
+    """Summarize matched metrics by AIFS initialization month and lead bin."""
+
+    rows: list[dict[str, Any]] = []
+    if matched.empty or "YEAR_MONTH" not in matched.columns:
+        return pd.DataFrame(rows)
+    for year_month, month_part in matched.groupby("YEAR_MONTH"):
+        for lead_bin in DEFAULT_LEAD_BINS:
+            part = month_part.loc[(month_part["LEAD_HOUR"] >= lead_bin.min_hour) & (month_part["LEAD_HOUR"] < lead_bin.max_hour)]
+            if part.empty:
+                continue
+            rows.append(
+                {
+                    "year_month": str(year_month),
+                    "lead_bin": lead_bin.name,
+                    "n_ref": int(len(part)),
+                    "recall": float(part["hit"].mean()),
+                    "loc_error_median_km": float(part["loc_error_km"].median(skipna=True)),
+                    "track_bias_median_km": float(part["track_bias_km"].median(skipna=True)),
+                    "end2end_median_km": float(part["end2end_km"].median(skipna=True)),
+                }
+            )
+    return pd.DataFrame(rows).sort_values(["year_month", "lead_bin"]).reset_index(drop=True)
+
+
 def main() -> int:
     """CLI entry point."""
 
@@ -166,20 +191,24 @@ def main() -> int:
     matched = _attach_reference_month(matched, references)
     summary = summarize_by_lead(matched)
     by_month = _summarize_by_month(matched)
+    by_month_lead = _summarize_by_month_lead(matched)
     pr = precision_recall_curve(predictions, references, thresholds=[0.1, 0.2, 0.3, 0.5, 0.7])
     out_dir = Path(config.get("paths", {}).get("output_dir", ROOT / "outputs"))
     out_dir.mkdir(parents=True, exist_ok=True)
     matched_path = _with_split_suffix(out_dir / "matched_metrics.csv", args.split)
     summary_path = _with_split_suffix(out_dir / "metrics_by_lead.csv", args.split)
     month_path = _with_split_suffix(out_dir / "metrics_by_month.csv", args.split)
+    month_lead_path = _with_split_suffix(out_dir / "metrics_by_month_lead.csv", args.split)
     pr_path = _with_split_suffix(out_dir / "precision_recall.csv", args.split)
     matched.to_csv(matched_path, index=False)
     summary.to_csv(summary_path, index=False)
     by_month.to_csv(month_path, index=False)
+    by_month_lead.to_csv(month_lead_path, index=False)
     pr.to_csv(pr_path, index=False)
     print(f"Wrote {matched_path}")
     print(f"Wrote {summary_path}")
     print(f"Wrote {month_path}")
+    print(f"Wrote {month_lead_path}")
     print(f"Wrote {pr_path}")
     return 0
 

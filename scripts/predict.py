@@ -101,7 +101,9 @@ def main() -> int:
         files = iter_files(config.get("paths", {}).get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"])
         files = select_aifs_files(config, files, args.split)
         domain_cfg = DomainConfig.from_mapping(config.get("domain"))
-        for path in files:
+        for index, path in enumerate(files, start=1):
+            if index % 200 == 0:
+                print(f"predict aifs processed={index}/{len(files)} split={args.split}", flush=True)
             field, meta = read_aifs_channels(path, channels=config["channels"], domain=domain_cfg, aifs_config=config.get("aifs", {}))
             if norm_stats is not None:
                 field = apply_norm(field, norm_stats)

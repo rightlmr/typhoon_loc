@@ -47,7 +47,14 @@ def _load_pretrained(model: torch.nn.Module, config: dict[str, Any]) -> None:
     print(f"Loaded {ckpt_path}")
 
 
-def _train(model: torch.nn.Module, train_loader: DataLoader, val_loader: DataLoader, config: dict[str, Any], device: str) -> dict[str, Any]:
+def _train(
+    model: torch.nn.Module,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    config: dict[str, Any],
+    device: str,
+    ckpt_path: Path,
+) -> dict[str, Any]:
     """Fine-tune decoder and heads."""
 
     train_cfg = config.get("train", {})
@@ -60,25 +67,35 @@ def _train(model: torch.nn.Module, train_loader: DataLoader, val_loader: DataLoa
     epochs = int(train_cfg.get("epochs", 12))
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(epochs, 1))
     patience = int(train_cfg.get("patience", 4))
+    log_every = int(train_cfg.get("log_every_batches", 0) or 0)
     best_mae = float("inf")
     best_payload: dict[str, Any] | None = None
     stale = 0
+    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
     for epoch in range(epochs):
         model.train()
         running = 0.0
-        for batch in train_loader:
+        for step, batch in enumerate(train_loader, start=1):
             batch = {key: value.to(device) for key, value in batch.items() if isinstance(value, torch.Tensor)}
             optimizer.zero_grad(set_to_none=True)
             losses = loss_fn(model(batch["input"]), batch)
             losses["loss"].backward()
             optimizer.step()
             running += float(losses["loss"].detach().cpu())
+            if log_every > 0 and step % log_every == 0:
+                print(
+                    f"epoch={epoch + 1} step={step}/{len(train_loader)} "
+                    f"train_loss_running={running / max(step, 1):.4f}",
+                    flush=True,
+                )
         scheduler.step()
         val_mae = _center_mae_km(model, val_loader, device, config)
         print(f"epoch={epoch + 1} train_loss={running / max(len(train_loader), 1):.4f} val_center_mae_km={val_mae:.2f}")
         if val_mae < best_mae:
             best_mae = val_mae
             best_payload = model.checkpoint_payload(config)
+            torch.save(best_payload, ckpt_path)
+            print(f"Wrote best checkpoint {ckpt_path} val_center_mae_km={best_mae:.2f}", flush=True)
             stale = 0
         else:
             stale += 1
@@ -170,11 +187,26 @@ def main() -> int:
         val_ds = Subset(dataset, val_idx)
 
     loader_cfg = config.get("train", {})
-    train_loader = DataLoader(train_ds, batch_size=int(loader_cfg.get("batch_size", 1)), shuffle=True, collate_fn=collate_batch)
-    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, collate_fn=collate_batch)
-    payload = _train(model, train_loader, val_loader, config, device)
+    num_workers = int(loader_cfg.get("num_workers", 0))
+    pin_memory = device == "cuda"
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=int(loader_cfg.get("batch_size", 1)),
+        shuffle=True,
+        collate_fn=collate_batch,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=1,
+        shuffle=False,
+        collate_fn=collate_batch,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
     ckpt_path = Path(config.get("paths", {}).get("finetune_ckpt", ROOT / "outputs" / "finetune_best.ckpt"))
-    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _train(model, train_loader, val_loader, config, device, ckpt_path)
     torch.save(payload, ckpt_path)
     print(f"Wrote {ckpt_path}")
     return 0

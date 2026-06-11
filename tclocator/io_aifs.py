@@ -93,6 +93,22 @@ def _torch_load_aifs_tensor(path: str | Path) -> Any:
         return torch.load(path, map_location="cpu")
 
 
+def _aifs_tensor_payload_to_array(tensor: Any, path: str | Path) -> np.ndarray:
+    """Normalize a loaded AIFS tensor payload to a NumPy array."""
+
+    if isinstance(tensor, dict):
+        for candidate in ("tensor", "data", "field", "fields"):
+            if candidate in tensor:
+                tensor = tensor[candidate]
+                break
+    if not hasattr(tensor, "shape"):
+        raise TypeError(f"Unsupported AIFS .pt payload type: {type(tensor)!r}")
+    arr = tensor.detach().cpu().numpy() if hasattr(tensor, "detach") else np.asarray(tensor)
+    if arr.ndim != 3:
+        raise ValueError(f"AIFS .pt tensor must be [C,H,W], got {arr.shape} in {path}")
+    return np.asarray(arr)
+
+
 def _canonical_name(internal_name: str) -> str:
     """Normalize common internal aliases."""
 
@@ -165,17 +181,7 @@ def read_aifs_pt_variable(
     key = _canonical_name(internal_name)
     if key not in order:
         raise KeyError(f"AIFS tensor channel not configured: {internal_name}; available={order}")
-    tensor = _torch_load_aifs_tensor(path)
-    if isinstance(tensor, dict):
-        for candidate in ("tensor", "data", "field", "fields"):
-            if candidate in tensor:
-                tensor = tensor[candidate]
-                break
-    if not hasattr(tensor, "shape"):
-        raise TypeError(f"Unsupported AIFS .pt payload type: {type(tensor)!r}")
-    arr = tensor.detach().cpu().numpy() if hasattr(tensor, "detach") else np.asarray(tensor)
-    if arr.ndim != 3:
-        raise ValueError(f"AIFS .pt tensor must be [C,H,W], got {arr.shape}")
+    arr = _aifs_tensor_payload_to_array(_torch_load_aifs_tensor(path), path)
     if arr.shape[0] < len(order):
         raise ValueError(f"AIFS .pt tensor has {arr.shape[0]} channels, expected at least {len(order)}")
     return np.asarray(arr[order.index(key)], dtype=np.float32)
@@ -203,14 +209,23 @@ def read_aifs_channels(
     """Read a configured AIFS field as ``[C,H,W]`` float32."""
 
     aifs_config = aifs_config or {}
-    tensor_order = aifs_config.get("tensor_channel_order", DEFAULT_TENSOR_CHANNEL_ORDER)
+    tensor_order = [_canonical_name(name) for name in aifs_config.get("tensor_channel_order", DEFAULT_TENSOR_CHANNEL_ORDER)]
     arrays: dict[str, np.ndarray] = {}
+    pt_array: np.ndarray | None = None
 
     def read_crop(name: str) -> np.ndarray:
+        nonlocal pt_array
         arr = arrays.get(name)
         if arr is None:
             if Path(path).suffix.lower() == ".pt":
-                raw = read_aifs_pt_variable(path, name, tensor_channel_order=tensor_order)
+                key = _canonical_name(name)
+                if key not in tensor_order:
+                    raise KeyError(f"AIFS tensor channel not configured: {name}; available={tensor_order}")
+                if pt_array is None:
+                    pt_array = _aifs_tensor_payload_to_array(_torch_load_aifs_tensor(path), path)
+                    if pt_array.shape[0] < len(tensor_order):
+                        raise ValueError(f"AIFS .pt tensor has {pt_array.shape[0]} channels, expected at least {len(tensor_order)}")
+                raw = np.asarray(pt_array[tensor_order.index(key)], dtype=np.float32)
                 arr = crop_aifs_pt_global(raw, domain)
             else:
                 raw = read_aifs_variable(path, name)
