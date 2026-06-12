@@ -16,7 +16,7 @@ from tclocator.io_aifs import parse_aifs_filename, read_aifs_channels
 import pandas as pd
 
 from tclocator.common import DomainConfig, iter_files, load_config
-from tclocator.labels import find_field_min_center, read_ibtracs, records_at_time
+from tclocator.labels import find_field_min_center, find_hybrid_center, read_ibtracs, records_at_time
 from tclocator.metrics import DEFAULT_LEAD_BINS, match_predictions, precision_recall_curve, summarize_by_lead
 from tclocator.split import select_aifs_files
 
@@ -53,6 +53,7 @@ def _build_references(config: dict[str, Any], split: str) -> pd.DataFrame:
     domain = DomainConfig.from_mapping(config.get("domain"))
     label_cfg = config.get("labels", {})
     label_mode = str(label_cfg.get("mode", "in_field"))
+    center_criterion = str(label_cfg.get("center_criterion", "msl"))
     records = read_ibtracs(ib_path, config.get("ibtracs", {}).get("col_map", {}))
     rows: list[dict[str, Any]] = []
     for path in files:
@@ -62,7 +63,8 @@ def _build_references(config: dict[str, Any], split: str) -> pd.DataFrame:
             continue
         field = None
         if label_mode == "in_field":
-            field, _ = read_aifs_channels(path, channels=["msl"], domain=domain, aifs_config=config.get("aifs", {}))
+            channels = ["msl", "vo_850"] if center_criterion == "msl_vo_hybrid" else ["msl"]
+            field, _ = read_aifs_channels(path, channels=channels, domain=domain, aifs_config=config.get("aifs", {}))
         for _, record in at_time.iterrows():
             lat_true = float(record["LAT"])
             lon_true = float(record["LON"])
@@ -71,14 +73,27 @@ def _build_references(config: dict[str, Any], split: str) -> pd.DataFrame:
             elif label_mode == "in_field":
                 if field is None:
                     raise RuntimeError("MSL field was not loaded for in_field evaluation")
-                lat_field, lon_field = find_field_min_center(
-                    field[0],
-                    lat_true,
-                    lon_true,
-                    domain,
-                    float(label_cfg.get("search_radius_km", 300.0)),
-                    smooth_px=int(label_cfg.get("field_center_smooth_px", 0)),
-                )
+                if center_criterion == "msl_vo_hybrid":
+                    lat_field, lon_field, center_source = find_hybrid_center(
+                        field[0],
+                        field[1],
+                        lat_true,
+                        lon_true,
+                        domain,
+                        float(label_cfg.get("search_radius_km", 300.0)),
+                        field_center_smooth_px=int(label_cfg.get("field_center_smooth_px", 0)),
+                        vo_smooth_px=int(label_cfg.get("vo_smooth_px", 1)),
+                    )
+                else:
+                    lat_field, lon_field = find_field_min_center(
+                        field[0],
+                        lat_true,
+                        lon_true,
+                        domain,
+                        float(label_cfg.get("search_radius_km", 300.0)),
+                        smooth_px=int(label_cfg.get("field_center_smooth_px", 0)),
+                    )
+                    center_source = "msl"
             else:
                 raise ValueError("labels.mode must be 'ibtracs' or 'in_field'")
             rows.append(
@@ -91,6 +106,7 @@ def _build_references(config: dict[str, Any], split: str) -> pd.DataFrame:
                     "LON_TRUE": lon_true,
                     "LAT_FIELD": lat_field,
                     "LON_FIELD": lon_field,
+                    "CENTER_SOURCE": center_source if label_mode == "in_field" else "ibtracs",
                 }
             )
     return pd.DataFrame(rows)

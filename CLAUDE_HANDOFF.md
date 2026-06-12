@@ -1484,6 +1484,223 @@ compileall: passed
 split tests: passed
 ```
 
+## 23. Step 5 Truth Build And Hybrid Gate
+
+This section records the work from `D:\downloads\STEP5_TRUTH_HYBRID_CROSSYEAR.md`.
+
+Important correction to the prior interpretation:
+
+- `track_bias_median_km` is the distance between the evaluation reference center and IBTrACS truth.
+- It is not a tracker-association error.
+- Phase C used `ibtracs` references, so track bias was forced to zero.
+- Phase D used `in_field` references, so nonzero track bias is expected and measures field-center displacement from truth.
+- C/D `loc_error_median_km` are not directly comparable when their reference definitions differ; `end2end_median_km` is the comparable business metric.
+
+### 23.1 Phase T Truth Conversion
+
+Command:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\build_ibtracs_truth.py --config configs\finetune.yaml --input data\ibtracs\full\ibtracs.ALL.list.v04r01.csv
+```
+
+Result:
+
+```text
+PASS
+```
+
+Implementation notes:
+
+- New script: `scripts/build_ibtracs_truth.py`.
+- It writes the official-source conversion to `outputs/audit/ibtracs_converted_project_format.csv`.
+- It writes the merged local truth file to `data/ibtracs/georef_2020_2025.csv`.
+- The original `data/ibtracs/georef.csv` is not overwritten.
+- The script imports `pygrib` through `tclocator` before importing `pandas`, avoiding the pygrib/pyproj DLL crash seen when pandas is imported first.
+- The converter does not filter to `TRACK_TYPE == main`. That filter would wrongly discard 2025 western/northern-hemisphere `PROVISIONAL` rows from the current official IBTrACS file. The 2024 overlap months still contain only `main` rows and therefore remain exactly consistent with old truth.
+
+Conversion stats (`outputs/audit/ibtracs_conversion_stats.json`):
+
+```json
+{
+  "raw_rows": 722983,
+  "after_track_type_filter": 722983,
+  "dropped_bad_numeric_or_time": 0,
+  "dropped_non_6h": 369163,
+  "dropped_out_of_domain": 147932,
+  "dropped_duplicate_time_sid": 0
+}
+```
+
+Overlap consistency gate (`outputs/audit/truth_overlap_consistency.csv`):
+
+```text
+year_month,n_records_old,n_records_new,new_old_ratio,matched_records,position_median_km,position_max_km,match_mode,pass
+2024-05,56,56,1.0,56,0.0,2.8272069309896195e-12,time_sid,True
+2024-06,47,47,1.0,47,0.0,4.231478842490107e-12,time_sid,True
+2024-07,171,171,1.0,171,0.0,2.7952272962114123e-12,time_sid,True
+2024-08,479,479,1.0,479,0.0,5.059647494668353e-12,time_sid,True
+2024-09,409,409,1.0,409,0.0,4.296401011876695e-12,time_sid,True
+2024-10,280,280,1.0,280,0.0,4.205147948181035e-12,time_sid,True
+2024-11,244,244,1.0,244,0.0,5.522307669202817e-12,time_sid,True
+```
+
+### 23.2 Coverage And Alignment After Truth Build
+
+Command:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\audit_data_coverage.py --config configs\finetune.yaml --max-cases-per-month 20
+```
+
+Result:
+
+```text
+PASS_WITH_BLOCKED_MONTHS
+```
+
+Coverage table (`outputs/audit/aifs_truth_join.csv`):
+
+```text
+year_month,n_files,n_inits,lead_min,lead_max,n_leads_per_init_median,missing_leads_examples,truth,n_records,n_sids
+2024-04,1230,30,0,240,41.0,,MISSING,0,0
+2024-05,1271,31,0,240,41.0,,OK,56,2
+2024-06,1230,30,0,240,41.0,,OK,47,5
+2024-07,1271,31,0,240,41.0,,OK,171,8
+2024-08,1271,31,0,240,41.0,,OK,479,16
+2024-09,1230,30,0,240,41.0,,OK,409,21
+2024-10,1271,31,0,240,41.0,,OK,280,13
+2024-11,1230,30,0,240,41.0,,OK,244,10
+2024-12,1271,31,0,240,41.0,,OK,19,1
+2025-01,1271,31,0,240,41.0,,MISSING,0,0
+2025-02,1066,26,0,240,41.0,,MISSING,0,0
+2025-07,1271,31,0,240,41.0,,OK,272,14
+2025-08,1271,31,0,240,41.0,,OK,345,20
+```
+
+Coverage decision (`outputs/audit/coverage_decision.json`):
+
+```json
+{
+  "truth_usable_months": ["2024-05", "2024-06", "2024-07", "2024-08", "2024-09", "2024-10", "2024-11", "2024-12", "2025-07", "2025-08"],
+  "truth_blocked_months": ["2024-04", "2025-01", "2025-02"],
+  "alignment_pass_months": ["2024-05", "2024-06", "2024-07", "2024-08", "2024-09", "2024-10", "2024-11", "2025-07", "2025-08"],
+  "alignment_blocked_months": ["2024-12"],
+  "blocked_months": ["2024-04", "2024-12", "2025-01", "2025-02"],
+  "recommended_data_usable_months": ["2024-05", "2024-06", "2024-07", "2024-08", "2024-09", "2024-10", "2024-11", "2025-07", "2025-08"]
+}
+```
+
+Interpretation:
+
+- `2025-07` and `2025-08` are now unlocked by truth coverage and AIFS alignment.
+- `2025-01` and `2025-02` remain blocked because the current official source has no in-domain truth rows for those AIFS months.
+- `2024-12` remains blocked because the monthly alignment pressure gate fails on weak systems.
+- Current `configs/finetune.yaml` and `configs/infer.yaml` point to `data/ibtracs/georef_2020_2025.csv`, but `data.usable_months` remains the original seven 2024 months because Step 5 core must keep the Phase D data/split unchanged.
+
+### 23.3 Step 5 Hybrid Diagnostic
+
+For the diagnostic only, `labels.center_criterion` was set to `msl_vo_hybrid` with:
+
+```yaml
+labels:
+  mode: "in_field"
+  center_criterion: "msl_vo_hybrid"
+  search_radius_km: 100
+  vo_smooth_px: 1
+finetune:
+  lead_max: 120
+data.usable_months: ["2024-05", "2024-06", "2024-07", "2024-08", "2024-09", "2024-10", "2024-11"]
+split.val_groups_override: ["2024-08", "2024-10"]
+```
+
+Command:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\phase0_consistency_and_displacement.py --config configs\finetune.yaml --lead-max 120 --diagnostic-radius-km 500 --progress-every 200
+```
+
+Outputs:
+
+```text
+outputs/phase0/displacement_vs_lead.csv
+outputs/phase0/displacement_summary_by_lead.csv
+outputs/phase0/displacement_vs_lead.png
+outputs/phase0/displacement_uncensored_raw.csv
+outputs/phase0/displacement_uncensored_by_lead.csv
+outputs/phase0/displacement_uncensored_by_lead.png
+```
+
+Uncensored diagnostic summary (`outputs/phase0/displacement_uncensored_by_lead.csv`):
+
+```text
+method,lead_bin,n,mean_km,median_km,p75_km,p90_km,cap_fraction,vo_fraction
+hybrid_100,000-024,1686,39.362305282136234,33.80307461416837,55.1969350374903,78.00804116044807,0.0771055753262159,0.0771055753262159
+hybrid_100,024-048,1686,57.73564787608074,57.42651204053102,83.39536393490421,93.7697491285814,0.21233689205219455,0.21233689205219455
+hybrid_100,048-072,1686,71.16904916919114,80.8096189912002,92.66308308933343,97.24707827807465,0.4543297746144721,0.4543297746144721
+hybrid_100,072-096,1686,77.70996265038707,87.56492777335286,94.73767910152577,97.75823500145202,0.6287069988137604,0.6287069988137604
+hybrid_100,096-120,1686,80.70347630483332,89.44611875956832,95.28152907010204,98.03330072512199,0.7147093712930012,0.7147093712930012
+msl_descent_500,000-024,1686,45.21200275993781,33.844046297660455,56.364362750610425,88.32637163422542,0.002372479240806643,0.0
+msl_descent_500,024-048,1686,76.4747045521639,58.68052638498072,93.57978297858389,138.42177797416235,0.011269276393831554,0.0
+msl_descent_500,048-072,1686,117.42157603705172,93.5722207804443,147.0781451469336,227.43313218981552,0.022538552787663108,0.0
+msl_descent_500,072-096,1686,156.9762784352594,126.8253618626799,201.378512228748,318.68090126029955,0.04151838671411625,0.0
+msl_descent_500,096-120,1686,191.25817055522862,157.23805093080796,260.5991851613263,419.0761189207283,0.07473309608540925,0.0
+```
+
+Center-source counts from `outputs/phase0/displacement_uncensored_raw.csv`:
+
+```text
+method           center_source
+hybrid_100       msl              5027
+                 vo               3827
+msl_descent_500  msl              8854
+```
+
+Critical hybrid gate statistic:
+
+```text
+vo fallback median distance to truth = 91.60 km (n=3827)
+required by Step 5: clearly below the old cap-point reference of 82 km
+```
+
+### 23.4 Step 5 Gate Conclusion
+
+Step 5 hybrid gate fails.
+
+Reason:
+
+- The `vo_850` fallback centers are not closer than the msl cap-point reference.
+- The overall hybrid curve is better than uncensored 500 km MSL descent at long lead, but the direct fallback quality requirement is not met.
+- Per the Step 5 document, no hybrid label-cache rebuild, no hybrid retrain, and no Phase E cross-year run should be performed after this failure.
+
+Current config state after the failed gate:
+
+- `paths.ibtracs_csv` remains `F:/typhoon_loc/data/ibtracs/georef_2020_2025.csv`.
+- `labels.center_criterion` is reverted to `"msl"` in both `configs/finetune.yaml` and `configs/infer.yaml`.
+- `data.usable_months` remains the original Phase D seven-month set: `2024-05` through `2024-11`.
+
+Recommended next independent variables:
+
+1. Tier B input channels, especially adding `t_850`, because vo-only fallback did not improve the cap-limited label center enough.
+2. A controlled partial-unfreeze experiment after Tier B, not mixed into the same step.
+3. A separate cross-year validation only after a label criterion passes its own gate; the truth and alignment audit has already unlocked `2025-07` and `2025-08` for that future phase.
+
+### 23.5 Verification
+
+Commands:
+
+```powershell
+D:\study\envs\tc_loc\python.exe -m compileall tclocator scripts tests
+D:\study\envs\tc_loc\python.exe -m pytest -q
+```
+
+Results:
+
+```text
+compileall: passed
+pytest: 11 passed in 15.03s
+```
+
 ## 20. Step 4 Phase C Short-Lead Scaled Retrain
 
 Phase C was run after Phase A/B using only the Phase A usable AIFS months:

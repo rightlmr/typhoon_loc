@@ -5,7 +5,7 @@ data:
 paths:
   era5_dir: "F:/typhoon_loc/data/era5"
   aifs_dir: "G:/AIFS_PT"
-  ibtracs_csv: "F:/typhoon_loc/data/ibtracs/georef.csv"
+  ibtracs_csv: "F:/typhoon_loc/data/ibtracs/georef_2020_2025.csv"
   output_dir: "F:/typhoon_loc/outputs"
   norm_stats_era5: "F:/typhoon_loc/outputs/norm_stats_era5.json"
   norm_stats_aifs: "F:/typhoon_loc/outputs/norm_stats_aifs.json"
@@ -21,9 +21,11 @@ ibtracs:
   col_map: {time: "ISO_TIME", sid: "SID", lat: "LAT", lon: "LON"}
 labels:
   mode: "in_field"
+  center_criterion: "msl"
   search_radius_km: 100
   sigma_px: 3
   field_center_smooth_px: 0
+  vo_smooth_px: 1
 split:
   group_by: "year_month"
   val_fraction: 0.2

@@ -18,7 +18,7 @@ import numpy as np
 from tclocator.common import DomainConfig, haversine_km, iter_files, load_config
 from tclocator.io_aifs import parse_aifs_filename, read_aifs_channels
 from tclocator.io_era5 import read_era5_channels
-from tclocator.labels import find_field_min_center, read_ibtracs, records_at_time
+from tclocator.labels import find_field_min_center, find_hybrid_center, read_ibtracs, records_at_time
 from tclocator.split import filter_aifs_files_by_usable_months
 import pandas as pd
 
@@ -96,13 +96,38 @@ def _synthetic_displacements() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _synthetic_uncensored_displacements(df: pd.DataFrame) -> pd.DataFrame:
+    """Create deterministic smoke-test rows for the dual Step 5 diagnostics."""
+
+    rows: list[dict[str, Any]] = []
+    for _, row in df.iterrows():
+        for method, scale, source in [("msl_descent_500", 1.4, "msl"), ("hybrid_100", 1.0, "vo")]:
+            rows.append(
+                {
+                    "method": method,
+                    "SID": row["SID"],
+                    "valid_time": row["valid_time"],
+                    "lead_hour": int(row["lead_hour"]),
+                    "lat_true": float(row["lat_true"]),
+                    "lon_true": float(row["lon_true"]),
+                    "lat_field": float(row["lat_field"]),
+                    "lon_field": float(row["lon_field"]),
+                    "center_source": source,
+                    "stop_reason": "cap" if source == "vo" else "local_min",
+                    "displacement_km": float(row["displacement_km"]) * scale,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 def _real_displacements(
     config: dict[str, Any],
     *,
     lead_max: int | None = None,
+    diagnostic_radius_km: float = 500.0,
     progress_every: int = 200,
-) -> pd.DataFrame:
-    """Collect true-vs-field msl-min displacements from AIFS files."""
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Collect current-label and dual-diagnostic displacements from AIFS files."""
 
     paths = config.get("paths", {})
     aifs_files = filter_aifs_files_by_usable_months(
@@ -111,14 +136,17 @@ def _real_displacements(
     )
     ibtracs_path = Path(paths.get("ibtracs_csv", ""))
     if not aifs_files or not ibtracs_path.exists():
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
     domain = DomainConfig.from_mapping(config.get("domain"))
     labels_cfg = config.get("labels", {})
     radius = float(labels_cfg.get("search_radius_km", 100.0))
     smooth_px = int(labels_cfg.get("field_center_smooth_px", 0))
+    vo_smooth_px = int(labels_cfg.get("vo_smooth_px", 1))
+    center_criterion = str(labels_cfg.get("center_criterion", "msl"))
     records = read_ibtracs(ibtracs_path, config.get("ibtracs", {}).get("col_map", {}))
     rows: list[dict[str, Any]] = []
+    diagnostic_rows: list[dict[str, Any]] = []
     processed = 0
     for path in aifs_files:
         meta = parse_aifs_filename(path)
@@ -130,31 +158,89 @@ def _real_displacements(
         processed += 1
         if progress_every > 0 and processed % progress_every == 0:
             print(f"phase0 processed_fields={processed} rows={len(rows)}", flush=True)
-        field, _ = read_aifs_channels(path, channels=["msl"], domain=domain, aifs_config=config.get("aifs", {}))
+        field, _ = read_aifs_channels(path, channels=["msl", "vo_850"], domain=domain, aifs_config=config.get("aifs", {}))
         msl = field[0]
+        vo = field[1]
         for _, record in at_time.iterrows():
-            lat_field, lon_field = find_field_min_center(
-                msl,
-                float(record["LAT"]),
-                float(record["LON"]),
-                domain,
-                radius,
-                smooth_px=smooth_px,
-            )
-            displacement = float(haversine_km(record["LAT"], record["LON"], lat_field, lon_field))
+            lat_true = float(record["LAT"])
+            lon_true = float(record["LON"])
+            if center_criterion == "msl_vo_hybrid":
+                lat_field, lon_field, center_source = find_hybrid_center(
+                    msl,
+                    vo,
+                    lat_true,
+                    lon_true,
+                    domain,
+                    radius,
+                    field_center_smooth_px=smooth_px,
+                    vo_smooth_px=vo_smooth_px,
+                )
+            else:
+                lat_field, lon_field, center_source = (
+                    *find_field_min_center(
+                        msl,
+                        lat_true,
+                        lon_true,
+                        domain,
+                        radius,
+                        smooth_px=smooth_px,
+                    ),
+                    "msl",
+                )
+            displacement = float(haversine_km(lat_true, lon_true, lat_field, lon_field))
             rows.append(
                 {
                     "SID": record["SID"],
                     "valid_time": meta.valid_time.isoformat(),
                     "lead_hour": meta.forecast_hour,
-                    "lat_true": float(record["LAT"]),
-                    "lon_true": float(record["LON"]),
+                    "lat_true": lat_true,
+                    "lon_true": lon_true,
                     "lat_field": lat_field,
                     "lon_field": lon_field,
+                    "center_source": center_source,
                     "displacement_km": displacement,
                 }
             )
-    return pd.DataFrame(rows)
+
+            msl500_lat, msl500_lon, msl500_reason = find_field_min_center(
+                msl,
+                lat_true,
+                lon_true,
+                domain,
+                float(diagnostic_radius_km),
+                smooth_px=smooth_px,
+                return_stop_reason=True,
+            )
+            hybrid_lat, hybrid_lon, hybrid_source = find_hybrid_center(
+                msl,
+                vo,
+                lat_true,
+                lon_true,
+                domain,
+                radius,
+                field_center_smooth_px=smooth_px,
+                vo_smooth_px=vo_smooth_px,
+            )
+            for method, cand_lat, cand_lon, source, reason in [
+                ("msl_descent_500", msl500_lat, msl500_lon, "msl", msl500_reason),
+                ("hybrid_100", hybrid_lat, hybrid_lon, hybrid_source, "cap" if hybrid_source == "vo" else "local_min"),
+            ]:
+                diagnostic_rows.append(
+                    {
+                        "method": method,
+                        "SID": record["SID"],
+                        "valid_time": meta.valid_time.isoformat(),
+                        "lead_hour": meta.forecast_hour,
+                        "lat_true": lat_true,
+                        "lon_true": lon_true,
+                        "lat_field": cand_lat,
+                        "lon_field": cand_lon,
+                        "center_source": source,
+                        "stop_reason": reason,
+                        "displacement_km": float(haversine_km(lat_true, lon_true, cand_lat, cand_lon)),
+                    }
+                )
+    return pd.DataFrame(rows), pd.DataFrame(diagnostic_rows)
 
 
 def _summarize(df: pd.DataFrame) -> pd.DataFrame:
@@ -175,6 +261,33 @@ def _summarize(df: pd.DataFrame) -> pd.DataFrame:
                 "p90_km": float(part["displacement_km"].quantile(0.90)),
             }
         )
+    return pd.DataFrame(rows)
+
+
+def _summarize_uncensored(df: pd.DataFrame) -> pd.DataFrame:
+    """Summarize dual Step 5 displacement diagnostics by method and lead bin."""
+
+    rows: list[dict[str, Any]] = []
+    if df.empty:
+        return pd.DataFrame(rows)
+    for method, method_part in df.groupby("method"):
+        for lo, hi in LEAD_BINS:
+            part = method_part.loc[(method_part["lead_hour"] >= lo) & (method_part["lead_hour"] < hi)]
+            if part.empty:
+                continue
+            rows.append(
+                {
+                    "method": str(method),
+                    "lead_bin": f"{lo:03d}-{hi:03d}",
+                    "n": int(len(part)),
+                    "mean_km": float(part["displacement_km"].mean()),
+                    "median_km": float(part["displacement_km"].median()),
+                    "p75_km": float(part["displacement_km"].quantile(0.75)),
+                    "p90_km": float(part["displacement_km"].quantile(0.90)),
+                    "cap_fraction": float((part["stop_reason"] == "cap").mean()),
+                    "vo_fraction": float((part["center_source"] == "vo").mean()),
+                }
+            )
     return pd.DataFrame(rows)
 
 
@@ -228,6 +341,49 @@ def _plot(df: pd.DataFrame, path: Path) -> None:
     _write_png(path, image)
 
 
+def _plot_uncensored(df: pd.DataFrame, path: Path) -> None:
+    """Write a two-method displacement-vs-lead scatter PNG."""
+
+    if df.empty:
+        return
+    width, height = 900, 560
+    margin_left, margin_bottom, margin_top, margin_right = 80, 70, 40, 30
+    image = np.full((height, width, 3), 255, dtype=np.uint8)
+    colors = {"msl_descent_500": (31, 119, 180), "hybrid_100": (214, 39, 40)}
+
+    def draw_rect(cx: int, cy: int, radius: int, color: tuple[int, int, int]) -> None:
+        image[max(0, cy - radius) : min(height, cy + radius + 1), max(0, cx - radius) : min(width, cx + radius + 1)] = color
+
+    def draw_line(x0: int, y0: int, x1: int, y1: int, color: tuple[int, int, int]) -> None:
+        n = max(abs(x1 - x0), abs(y1 - y0), 1)
+        xs = np.linspace(x0, x1, n + 1).astype(int)
+        ys = np.linspace(y0, y1, n + 1).astype(int)
+        image[np.clip(ys, 0, height - 1), np.clip(xs, 0, width - 1)] = color
+
+    plot_x0 = margin_left
+    plot_x1 = width - margin_right
+    plot_y0 = margin_top
+    plot_y1 = height - margin_bottom
+    draw_line(plot_x0, plot_y1, plot_x1, plot_y1, (0, 0, 0))
+    draw_line(plot_x0, plot_y0, plot_x0, plot_y1, (0, 0, 0))
+    x_values = df["lead_hour"].astype(float).to_numpy()
+    y_values = df["displacement_km"].astype(float).to_numpy()
+    x_min, x_max = float(np.nanmin(x_values)), float(np.nanmax(x_values))
+    y_min, y_max = 0.0, float(max(np.nanmax(y_values), 1.0))
+    if x_max == x_min:
+        x_max += 1.0
+    for frac in np.linspace(0.0, 1.0, 6):
+        x = int(plot_x0 + frac * (plot_x1 - plot_x0))
+        y = int(plot_y1 - frac * (plot_y1 - plot_y0))
+        draw_line(x, plot_y0, x, plot_y1, (230, 230, 230))
+        draw_line(plot_x0, y, plot_x1, y, (230, 230, 230))
+    for _, row in df.iterrows():
+        x = int(plot_x0 + (float(row["lead_hour"]) - x_min) / (x_max - x_min) * (plot_x1 - plot_x0))
+        y = int(plot_y1 - (float(row["displacement_km"]) - y_min) / (y_max - y_min) * (plot_y1 - plot_y0))
+        draw_rect(x, y, 3, colors.get(str(row["method"]), (80, 80, 80)))
+    _write_png(path, image)
+
+
 def _write_png(path: Path, image: np.ndarray) -> None:
     """Write an RGB uint8 image as PNG using the standard library."""
 
@@ -273,6 +429,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=str(ROOT / "configs" / "finetune.yaml"))
     parser.add_argument("--lead-max", type=int, default=120)
+    parser.add_argument("--diagnostic-radius-km", type=float, default=500.0)
     parser.add_argument("--progress-every", type=int, default=200)
     parser.add_argument("--smoke-synthetic", action="store_true")
     args = parser.parse_args()
@@ -280,11 +437,16 @@ def main() -> int:
     config = load_config(args.config)
     out_dir = _output_dir(config)
     vo_result = {"status": "synthetic_smoke"} if args.smoke_synthetic else _vo_consistency(config)
-    df = (
-        _synthetic_displacements()
-        if args.smoke_synthetic
-        else _real_displacements(config, lead_max=int(args.lead_max), progress_every=int(args.progress_every))
-    )
+    if args.smoke_synthetic:
+        df = _synthetic_displacements()
+        uncensored = _synthetic_uncensored_displacements(df)
+    else:
+        df, uncensored = _real_displacements(
+            config,
+            lead_max=int(args.lead_max),
+            diagnostic_radius_km=float(args.diagnostic_radius_km),
+            progress_every=int(args.progress_every),
+        )
     if df.empty:
         print("Phase 0 displacement skipped: no AIFS/IBTrACS data found.")
     else:
@@ -298,6 +460,18 @@ def main() -> int:
         print(f"Wrote {raw_csv}")
         print(f"Wrote {summary_csv}")
         print(f"Wrote {png}")
+
+    if not uncensored.empty:
+        uncensored_raw_csv = out_dir / "displacement_uncensored_raw.csv"
+        uncensored_summary_csv = out_dir / "displacement_uncensored_by_lead.csv"
+        uncensored_png = out_dir / "displacement_uncensored_by_lead.png"
+        uncensored_summary = _summarize_uncensored(uncensored)
+        uncensored.to_csv(uncensored_raw_csv, index=False)
+        uncensored_summary.to_csv(uncensored_summary_csv, index=False)
+        _plot_uncensored(uncensored, uncensored_png)
+        print(f"Wrote {uncensored_raw_csv}")
+        print(f"Wrote {uncensored_summary_csv}")
+        print(f"Wrote {uncensored_png}")
 
     summary = _summarize(df) if not df.empty else pd.DataFrame()
     suggestions = _suggest(

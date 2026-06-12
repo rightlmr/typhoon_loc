@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from tclocator.common import DomainConfig, build_lat_lon, haversine_km, latlon_to_grid
-from tclocator.labels import find_field_min_center
+from tclocator.labels import find_field_min_center, find_hybrid_center
 
 
 def _old_global_argmin_center(
@@ -64,3 +64,39 @@ def test_field_center_cap_prevents_long_descent() -> None:
     center = find_field_min_center(msl.astype(np.float32), true_lat, true_lon, domain, 150.0)
 
     assert float(haversine_km(center[0], center[1], true_lat, true_lon)) <= 155.0
+
+
+def test_hybrid_uses_msl_when_descent_reaches_local_min() -> None:
+    """Hybrid keeps the MSL center when descent does not hit the cap."""
+
+    domain = DomainConfig(lat_min=0.0, lat_max=10.0, lon_min=100.0, lon_max=112.0, res=0.25)
+    target = (5.0, 105.0)
+    distractor = (5.0, 108.0)
+    msl = _two_low_field(domain, target, distractor)
+    vo = np.zeros(domain.shape, dtype=np.float32)
+    y, x = latlon_to_grid(distractor[0], distractor[1], domain)
+    vo[int(round(float(y))), int(round(float(x)))] = 1.0
+
+    center_lat, center_lon, source = find_hybrid_center(msl, vo, target[0], target[1], domain, 250.0)
+
+    assert source == "msl"
+    assert float(haversine_km(center_lat, center_lon, target[0], target[1])) < 40.0
+
+
+def test_hybrid_uses_vo_when_msl_descent_hits_cap() -> None:
+    """Hybrid switches to the strongest local vo_850 point only on cap stops."""
+
+    domain = DomainConfig(lat_min=0.0, lat_max=10.0, lon_min=100.0, lon_max=112.0, res=0.25)
+    true_lat, true_lon = 5.0, 105.0
+    vo_lat, vo_lon = 5.0, 105.5
+    yy, xx = np.indices(domain.shape, dtype=np.float32)
+    far_y, far_x = latlon_to_grid(5.0, 110.0, domain)
+    msl = 101000.0 - 2000.0 * np.exp(-(((yy - float(far_y)) ** 2 + (xx - float(far_x)) ** 2) / (2.0 * 12.0**2)))
+    vo = np.zeros(domain.shape, dtype=np.float32)
+    vy, vx = latlon_to_grid(vo_lat, vo_lon, domain)
+    vo[int(round(float(vy))), int(round(float(vx)))] = 1.0
+
+    center_lat, center_lon, source = find_hybrid_center(msl.astype(np.float32), vo, true_lat, true_lon, domain, 80.0, vo_smooth_px=0)
+
+    assert source == "vo"
+    assert float(haversine_km(center_lat, center_lon, vo_lat, vo_lon)) < 1.0

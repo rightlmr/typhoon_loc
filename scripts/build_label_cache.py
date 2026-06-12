@@ -11,11 +11,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tclocator.common import DomainConfig, PHASE0_REQUIRED_MESSAGE, iter_files, load_config
+from tclocator.common import DomainConfig, PHASE0_REQUIRED_MESSAGE, haversine_km, iter_files, load_config
 from tclocator.dataset import SyntheticTCDataset, label_cache_path, parse_era5_valid_time_from_name
 from tclocator.io_aifs import parse_aifs_filename, read_aifs_channels
 from tclocator.io_era5 import read_era5_channels
 from tclocator.labels import generate_labels, read_ibtracs, records_at_time, save_label_npz
+from tclocator.metrics import DEFAULT_LEAD_BINS
 from tclocator.split import filter_aifs_files_by_usable_months
 import pandas as pd
 
@@ -44,6 +45,67 @@ def _smoke(config: dict[str, Any]) -> None:
         print(f"Wrote {path}")
 
 
+def _label_channels(label_config: dict[str, Any]) -> list[str]:
+    """Return the minimal field channels needed for label generation."""
+
+    if str(label_config.get("center_criterion", "msl")) == "msl_vo_hybrid":
+        return ["msl", "vo_850"]
+    return ["msl"]
+
+
+def _append_center_stats(rows: list[dict[str, Any]], label: dict[str, Any], lead_hour: int | None) -> None:
+    """Append per-target center-source diagnostics from a generated label."""
+
+    sources = label.get("center_source")
+    if sources is None or len(sources) == 0:
+        return
+    true_lat = label.get("true_lat")
+    true_lon = label.get("true_lon")
+    center_lat = label.get("center_lat")
+    center_lon = label.get("center_lon")
+    if true_lat is None or true_lon is None or center_lat is None or center_lon is None:
+        return
+    for idx, source in enumerate(sources):
+        dist = haversine_km(float(true_lat[idx]), float(true_lon[idx]), float(center_lat[idx]), float(center_lon[idx]))
+        rows.append(
+            {
+                "lead_hour": int(lead_hour or 0),
+                "center_source": str(source),
+                "center_to_truth_km": float(dist),
+            }
+        )
+
+
+def _write_center_stats(config: dict[str, Any], rows: list[dict[str, Any]], domain_name: str) -> None:
+    """Write lead-binned center-source diagnostics."""
+
+    out_dir = Path(config.get("paths", {}).get("output_dir", ROOT / "outputs"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = out_dir / f"label_center_sources_{domain_name}.csv"
+    summary_path = out_dir / f"label_center_source_by_lead_{domain_name}.csv"
+    raw = pd.DataFrame(rows)
+    raw.to_csv(raw_path, index=False)
+    summary_rows: list[dict[str, Any]] = []
+    if not raw.empty:
+        for lead_bin in DEFAULT_LEAD_BINS:
+            part = raw.loc[(raw["lead_hour"] >= lead_bin.min_hour) & (raw["lead_hour"] < lead_bin.max_hour)]
+            if part.empty:
+                continue
+            vo_part = part.loc[part["center_source"] == "vo"]
+            summary_rows.append(
+                {
+                    "lead_bin": lead_bin.name,
+                    "n": int(len(part)),
+                    "vo_fraction": float((part["center_source"] == "vo").mean()),
+                    "vo_center_to_truth_median_km": float(vo_part["center_to_truth_km"].median(skipna=True)) if not vo_part.empty else float("nan"),
+                    "all_center_to_truth_median_km": float(part["center_to_truth_km"].median(skipna=True)),
+                }
+            )
+    pd.DataFrame(summary_rows).to_csv(summary_path, index=False)
+    print(f"Wrote {raw_path}")
+    print(f"Wrote {summary_path}")
+
+
 def _build_era5(config: dict[str, Any]) -> None:
     """Build ERA5 label caches."""
 
@@ -55,23 +117,26 @@ def _build_era5(config: dict[str, Any]) -> None:
         return
     domain = DomainConfig.from_mapping(config.get("domain"))
     records = read_ibtracs(ibtracs_path, config.get("ibtracs", {}).get("col_map", {}))
+    center_stats: list[dict[str, Any]] = []
+    label_channels = _label_channels(config.get("labels", {}))
     for path in files:
         valid_time = parse_era5_valid_time_from_name(path)
         if valid_time is None:
             print(f"Skip {path}: cannot parse valid time from filename")
             continue
-        field, _ = read_era5_channels(path, channels=config["channels"], domain=domain, era5_config=config.get("era5", {}))
-        if "msl" not in config["channels"]:
-            raise ValueError("Label cache generation requires msl channel")
+        field, _ = read_era5_channels(path, channels=label_channels, domain=domain, era5_config=config.get("era5", {}))
         label = generate_labels(
-            msl=field[config["channels"].index("msl")],
+            msl=field[label_channels.index("msl")],
+            vo=field[label_channels.index("vo_850")] if "vo_850" in label_channels else None,
             records=records_at_time(records, valid_time),
             domain=domain,
             label_config=config.get("labels", {}),
         )
+        _append_center_stats(center_stats, label, None)
         out = label_cache_path(config, "era5", path)
         save_label_npz(label, out)
         print(f"Wrote {out}")
+    _write_center_stats(config, center_stats, "era5")
 
 
 def _build_aifs(config: dict[str, Any]) -> None:
@@ -92,18 +157,23 @@ def _build_aifs(config: dict[str, Any]) -> None:
         return
     domain = DomainConfig.from_mapping(config.get("domain"))
     records = read_ibtracs(ibtracs_path, config.get("ibtracs", {}).get("col_map", {}))
+    center_stats: list[dict[str, Any]] = []
+    label_channels = _label_channels(config.get("labels", {}))
     for path in files:
         meta = parse_aifs_filename(path)
-        field, _ = read_aifs_channels(path, channels=["msl"], domain=domain, aifs_config=config.get("aifs", {}))
+        field, _ = read_aifs_channels(path, channels=label_channels, domain=domain, aifs_config=config.get("aifs", {}))
         label = generate_labels(
             msl=field[0],
+            vo=field[label_channels.index("vo_850")] if "vo_850" in label_channels else None,
             records=records_at_time(records, pd.Timestamp(meta.valid_time)),
             domain=domain,
             label_config=config.get("labels", {}),
         )
+        _append_center_stats(center_stats, label, meta.forecast_hour)
         out = label_cache_path(config, "aifs", path)
         save_label_npz(label, out)
         print(f"Wrote {out}")
+    _write_center_stats(config, center_stats, "aifs")
 
 
 def main() -> int:

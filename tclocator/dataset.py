@@ -153,8 +153,9 @@ class FieldDataset(Dataset[dict[str, torch.Tensor]]):
         if "msl" not in self.channels:
             raise ValueError("Label generation requires an msl channel")
         msl = raw_field[self.channels.index("msl")]
+        vo = raw_field[self.channels.index("vo_850")] if "vo_850" in self.channels else None
         records = records_at_time(self.ibtracs_records, sample.valid_time)
-        return generate_labels(msl=msl, records=records, domain=self.domain, label_config=self.config.get("labels", {}))
+        return generate_labels(msl=msl, vo=vo, records=records, domain=self.domain, label_config=self.config.get("labels", {}))
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         """Read, normalize, and return one training sample."""

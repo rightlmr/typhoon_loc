@@ -8,7 +8,7 @@ from typing import Any, Iterable, Mapping
 import numpy as np
 import pandas as pd
 
-from tclocator.common import DomainConfig, grid_to_latlon, haversine_km, in_domain, latlon_to_grid
+from tclocator.common import DomainConfig, build_lat_lon, grid_to_latlon, haversine_km, in_domain, latlon_to_grid
 
 
 def read_ibtracs(path: str | Path, col_map: Mapping[str, str]) -> pd.DataFrame:
@@ -114,6 +114,54 @@ def find_field_min_center(
     return float(lat), float(lon)
 
 
+def find_hybrid_center(
+    msl: np.ndarray,
+    vo: np.ndarray,
+    true_lat: float,
+    true_lon: float,
+    domain: DomainConfig,
+    search_radius_km: float,
+    *,
+    field_center_smooth_px: int = 0,
+    vo_smooth_px: int = 1,
+) -> tuple[float, float, str]:
+    """Find a field center using MSL descent first and vo_850 only on cap stops.
+
+    The hybrid criterion keeps the existing MSL local-descent behavior whenever
+    it reaches a local minimum. If the descent hits the displacement cap, the
+    reference center switches to the strongest smoothed positive 850 hPa
+    vorticity inside the same best-track-centered search disk.
+    """
+
+    if msl.shape != domain.shape:
+        raise ValueError(f"msl shape {msl.shape} does not match domain {domain.shape}")
+    if vo.shape != domain.shape:
+        raise ValueError(f"vo shape {vo.shape} does not match domain {domain.shape}")
+
+    msl_lat, msl_lon, stop_reason = find_field_min_center(
+        msl,
+        true_lat,
+        true_lon,
+        domain,
+        search_radius_km,
+        smooth_px=field_center_smooth_px,
+        return_stop_reason=True,
+    )
+    if stop_reason != "cap":
+        return float(msl_lat), float(msl_lon), "msl"
+
+    vo_field = _box_smooth(vo, int(vo_smooth_px)) if vo_smooth_px > 0 else vo
+    lat1d, lon1d = build_lat_lon(domain)
+    dist = haversine_km(lat1d[:, None], lon1d[None, :], true_lat, true_lon)
+    mask = (dist <= search_radius_km) & np.isfinite(vo_field)
+    if not np.any(mask):
+        return float(msl_lat), float(msl_lon), "msl"
+    masked = np.where(mask, vo_field, -np.inf)
+    y, x = np.unravel_index(int(np.argmax(masked)), masked.shape)
+    lat, lon = grid_to_latlon(y, x, domain)
+    return float(lat), float(lon), "vo"
+
+
 def _iter_record_dicts(records: pd.DataFrame | Iterable[Mapping[str, Any]]) -> Iterable[Mapping[str, Any]]:
     """Yield records as dictionaries."""
 
@@ -126,6 +174,7 @@ def _iter_record_dicts(records: pd.DataFrame | Iterable[Mapping[str, Any]]) -> I
 def generate_labels(
     *,
     msl: np.ndarray,
+    vo: np.ndarray | None = None,
     records: pd.DataFrame | Iterable[Mapping[str, Any]],
     domain: DomainConfig,
     label_config: Mapping[str, Any],
@@ -138,10 +187,21 @@ def generate_labels(
     sigma = float(label_config.get("sigma_px", 3.0))
     search_radius_km = float(label_config.get("search_radius_km", 300.0))
     smooth_px = int(label_config.get("field_center_smooth_px", 0))
+    center_criterion = str(label_config.get("center_criterion", "msl"))
+    vo_smooth_px = int(label_config.get("vo_smooth_px", 1))
+    if center_criterion not in {"msl", "msl_vo_hybrid"}:
+        raise ValueError("labels.center_criterion must be 'msl' or 'msl_vo_hybrid'")
+    if mode == "in_field" and center_criterion == "msl_vo_hybrid" and vo is None:
+        raise ValueError("msl_vo_hybrid label generation requires a vo_850 field")
 
     heatmap = np.zeros(domain.shape, dtype=np.float32)
     offset = np.zeros((2, domain.height, domain.width), dtype=np.float32)
     mask = np.zeros(domain.shape, dtype=np.uint8)
+    center_sources: list[str] = []
+    true_lats: list[float] = []
+    true_lons: list[float] = []
+    center_lats: list[float] = []
+    center_lons: list[float] = []
 
     yy, xx = np.indices(domain.shape, dtype=np.float32)
     for record in _iter_record_dicts(records):
@@ -150,16 +210,37 @@ def generate_labels(
         if not in_domain(lat_true, lon_true, domain):
             continue
         if mode == "in_field":
-            center_lat, center_lon = find_field_min_center(
-                msl,
-                lat_true,
-                lon_true,
-                domain,
-                search_radius_km,
-                smooth_px=smooth_px,
-            )
+            if center_criterion == "msl_vo_hybrid":
+                if vo is None:
+                    raise ValueError("msl_vo_hybrid label generation requires a vo_850 field")
+                center_lat, center_lon, center_source = find_hybrid_center(
+                    msl,
+                    vo,
+                    lat_true,
+                    lon_true,
+                    domain,
+                    search_radius_km,
+                    field_center_smooth_px=smooth_px,
+                    vo_smooth_px=vo_smooth_px,
+                )
+            else:
+                center_lat, center_lon = find_field_min_center(
+                    msl,
+                    lat_true,
+                    lon_true,
+                    domain,
+                    search_radius_km,
+                    smooth_px=smooth_px,
+                )
+                center_source = "msl"
         else:
             center_lat, center_lon = lat_true, lon_true
+            center_source = "ibtracs"
+        center_sources.append(center_source)
+        true_lats.append(lat_true)
+        true_lons.append(lon_true)
+        center_lats.append(float(center_lat))
+        center_lons.append(float(center_lon))
 
         cy_f, cx_f = latlon_to_grid(center_lat, center_lon, domain, clip=True)
         cy = float(cy_f)
@@ -176,7 +257,16 @@ def generate_labels(
         offset[1, iy, ix] = cx - float(np.floor(cx))
         mask[iy, ix] = 1
 
-    return {"heatmap": heatmap, "offset": offset, "mask": mask}
+    return {
+        "heatmap": heatmap,
+        "offset": offset,
+        "mask": mask,
+        "center_source": np.asarray(center_sources, dtype="<U16"),
+        "true_lat": np.asarray(true_lats, dtype=np.float32),
+        "true_lon": np.asarray(true_lons, dtype=np.float32),
+        "center_lat": np.asarray(center_lats, dtype=np.float32),
+        "center_lon": np.asarray(center_lons, dtype=np.float32),
+    }
 
 
 def save_label_npz(label: Mapping[str, np.ndarray], path: str | Path) -> None:
@@ -184,15 +274,23 @@ def save_label_npz(label: Mapping[str, np.ndarray], path: str | Path) -> None:
 
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(target, heatmap=label["heatmap"], offset=label["offset"], mask=label["mask"])
+    payload = {"heatmap": label["heatmap"], "offset": label["offset"], "mask": label["mask"]}
+    for key in ("center_source", "true_lat", "true_lon", "center_lat", "center_lon"):
+        if key in label:
+            payload[key] = label[key]
+    np.savez_compressed(target, **payload)
 
 
 def load_label_npz(path: str | Path) -> dict[str, np.ndarray]:
     """Load a label npz file."""
 
     with np.load(path) as data:
-        return {
+        out = {
             "heatmap": data["heatmap"].astype(np.float32),
             "offset": data["offset"].astype(np.float32),
             "mask": data["mask"].astype(np.uint8),
         }
+        for key in ("center_source", "true_lat", "true_lon", "center_lat", "center_lon"):
+            if key in data:
+                out[key] = data[key]
+        return out
