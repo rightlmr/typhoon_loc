@@ -47,6 +47,7 @@ def _predict_array(
     *,
     iso_time: str | None,
     lead_hour: int | None,
+    conf_thresh: float | None = None,
 ) -> pd.DataFrame:
     """Predict one already-normalized field array."""
 
@@ -60,7 +61,7 @@ def _predict_array(
         domain,
         iso_time=iso_time,
         lead_hour=lead_hour,
-        conf_thresh=float(config.get("decode", {}).get("conf_thresh", 0.3)),
+        conf_thresh=float(conf_thresh if conf_thresh is not None else config.get("decode", {}).get("conf_thresh", 0.3)),
         lat_filter=tuple(config.get("decode", {}).get("lat_filter", [0.0, 40.0])),
     )
 
@@ -101,6 +102,7 @@ def main() -> int:
     parser.add_argument("--split", choices=["all", "train", "val"], default="all")
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--output", default=None)
+    parser.add_argument("--conf-thresh", type=float, default=None)
     parser.add_argument("--smoke-synthetic", action="store_true")
     args = parser.parse_args()
 
@@ -114,7 +116,17 @@ def main() -> int:
     if args.smoke_synthetic:
         dataset = SyntheticTCDataset(length=2, channels=config["channels"], seed=int(config.get("seed", 42)))
         for idx in range(len(dataset)):
-            rows.append(_predict_array(model, dataset[idx]["input"].numpy(), config, device, iso_time=f"synthetic_{idx}", lead_hour=0))
+            rows.append(
+                _predict_array(
+                    model,
+                    dataset[idx]["input"].numpy(),
+                    config,
+                    device,
+                    iso_time=f"synthetic_{idx}",
+                    lead_hour=0,
+                    conf_thresh=args.conf_thresh,
+                )
+            )
     elif args.domain == "aifs":
         norm_path = Path(config.get("paths", {}).get("norm_stats_aifs", ""))
         norm_stats = load_norm_stats(norm_path) if norm_path.exists() else None
@@ -129,7 +141,17 @@ def main() -> int:
             if norm_stats is not None:
                 field = apply_norm(field, norm_stats)
             parsed = parse_aifs_filename(path)
-            rows.append(_predict_array(model, field, config, device, iso_time=parsed.valid_time.isoformat(), lead_hour=parsed.forecast_hour))
+            rows.append(
+                _predict_array(
+                    model,
+                    field,
+                    config,
+                    device,
+                    iso_time=parsed.valid_time.isoformat(),
+                    lead_hour=parsed.forecast_hour,
+                    conf_thresh=args.conf_thresh,
+                )
+            )
     else:
         norm_path = Path(config.get("paths", {}).get("norm_stats_era5", ""))
         norm_stats = load_norm_stats(norm_path) if norm_path.exists() else None
@@ -139,7 +161,7 @@ def main() -> int:
             field, _ = read_era5_channels(path, channels=config["channels"], domain=domain_cfg, era5_config=config.get("era5", {}))
             if norm_stats is not None:
                 field = apply_norm(field, norm_stats)
-            rows.append(_predict_array(model, field, config, device, iso_time=path.stem, lead_hour=None))
+            rows.append(_predict_array(model, field, config, device, iso_time=path.stem, lead_hour=None, conf_thresh=args.conf_thresh))
 
     out = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=["ISO_TIME", "LAT", "LON", "CONF"])
     out_path = Path(args.output) if args.output else Path(config.get("paths", {}).get("predictions_csv", ROOT / "outputs" / "predictions.csv"))

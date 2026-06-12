@@ -1847,6 +1847,186 @@ compileall: passed
 pytest: 11 passed in 10.71s
 ```
 
+## 25. Ops-1 Operating Thresholds And Quiet-Period FAR
+
+This section records the work from `D:\downloads\STEP_OPS1_THRESHOLDS_FAR.md`.
+
+Scope obeyed:
+
+- No training was run.
+- No label cache was rebuilt.
+- No normalization stats were recomputed.
+- `configs/finetune.yaml` was not changed.
+- Model, loss, decode, tracking, AIFS I/O, and vorticity logic were not changed.
+- `scripts/predict.py` gained only the allowed `--conf-thresh` CLI override.
+- New evaluation scripts were added:
+  - `scripts/ops_threshold_sweep.py`
+  - `scripts/quiet_period_far.py`
+
+Checkpoint:
+
+```text
+outputs/finetune_best.ckpt
+SHA256 = DD4BB25F35A1D5B6AA06ED14DE64CE45D9E4348663DFA029AC5E05464732C2D2
+```
+
+This matches the Phase D backup checkpoint.
+
+### 25.1 Commands
+
+Low-threshold predictions:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\predict.py --config configs\infer.yaml --domain aifs --split all --output outputs\predictions_2025_sweep.csv --conf-thresh 0.05
+D:\study\envs\tc_loc\python.exe scripts\predict.py --config configs\finetune.yaml --domain aifs --split val --output outputs\predictions_2024val_sweep.csv --conf-thresh 0.05
+```
+
+Operational threshold sweep:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\ops_threshold_sweep.py --predictions-2025 outputs\predictions_2025_sweep.csv --config-2025 configs\infer.yaml --split-2025 all --predictions-2024val outputs\predictions_2024val_sweep.csv --config-2024val configs\finetune.yaml --split-2024val val
+```
+
+Quiet-period FAR:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\quiet_period_far.py --config configs\infer.yaml --months 2024-04,2025-01,2025-02
+D:\study\envs\tc_loc\python.exe scripts\quiet_period_far.py --config configs\infer.yaml --months 2024-04,2025-01,2025-02 --predictions-input outputs\predictions_quiet_sweep.csv
+```
+
+The second FAR command reused the low-threshold quiet predictions after fixing the `ALL` raw point aggregation.
+
+PowerShell again wrapped the `pynvml` FutureWarning as `NativeCommandError`, but each script completed and wrote the expected files.
+
+### 25.2 Output Inventory
+
+```text
+outputs/predictions_2025_sweep.csv: 11098 detections
+outputs/predictions_2024val_sweep.csv: 18331 detections
+outputs/predictions_quiet_sweep.csv: 4362 detections
+outputs/ops_sweep_2025.csv: 45 rows
+outputs/ops_sweep_2024val.csv: 45 rows
+outputs/quiet_far_sweep.csv: 180 rows
+outputs/ops_threshold_recommendation.csv
+outputs/ops_operating_thresholds.csv
+```
+
+The full raw sweep/FAR CSVs are local ignored outputs. The decision-driving tables and the recommended-threshold FAR slices are reproduced below because `outputs/` is intentionally not committed.
+
+### 25.3 Threshold Recommendation
+
+`outputs/ops_threshold_recommendation.csv`:
+
+```text
+lead_bin,recommended_conf_thresh,status,target_track_precision,track_precision,track_recall,point_precision,point_recall,n_tracks
+000-024,0.6,OK,0.7,0.75,0.26666666666666666,0.5897435897435898,0.3715670436187399,12
+024-048,0.5,OK,0.7,0.8125,0.5333333333333333,0.6023054755043228,0.3370967741935484,32
+048-096,0.8,OK,0.7,0.7333333333333333,0.22580645161290322,0.5274725274725275,0.07754442649434572,15
+096-120,0.8,UNREACHABLE,0.7,0.5,0.03333333333333333,0.417910447761194,0.045234248788368334,2
+ALL,0.7,OK,0.7,0.7205882352941176,0.6129032258064516,0.501532175689479,0.1509840098400984,68
+```
+
+Interpretation:
+
+- The recommended primary deployment thresholds are lead-specific.
+- `096-120` cannot reach track precision `0.7` at any tested threshold up to `0.8`; it is marked `UNREACHABLE`.
+- The `ALL` row is diagnostic only. Runtime deployment should prefer lead-specific thresholds.
+
+### 25.4 Quiet FAR At Recommended Thresholds
+
+Recommended-threshold FAR slices from `outputs/quiet_far_sweep.csv`:
+
+```text
+lead_bin=000-024, conf=0.6
+year_month,conf_thresh,lead_bin,raw_points_per_field,n_tracks,tracks_per_month
+2024-04,0.6,000-024,0.0,0,0.0
+2025-01,0.6,000-024,0.0161290322580645,0,0.0
+2025-02,0.6,000-024,0.1923076923076923,1,1.0
+ALL,0.6,000-024,0.0632183908045977,1,0.3333333333333333
+
+lead_bin=024-048, conf=0.5
+year_month,conf_thresh,lead_bin,raw_points_per_field,n_tracks,tracks_per_month
+2024-04,0.5,024-048,0.0083333333333333,0,0.0
+2025-01,0.5,024-048,0.0403225806451612,1,1.0
+2025-02,0.5,024-048,0.1634615384615384,2,2.0
+ALL,0.5,024-048,0.0660919540229885,3,1.0
+
+lead_bin=048-096, conf=0.8
+year_month,conf_thresh,lead_bin,raw_points_per_field,n_tracks,tracks_per_month
+2024-04,0.8,048-096,0.0,0,0.0
+2025-01,0.8,048-096,0.0,0,0.0
+2025-02,0.8,048-096,0.0240384615384615,1,1.0
+ALL,0.8,048-096,0.007183908045977,1,0.3333333333333333
+
+lead_bin=096-120, conf=0.8
+year_month,conf_thresh,lead_bin,raw_points_per_field,n_tracks,tracks_per_month
+2024-04,0.8,096-120,0.0,0,0.0
+2025-01,0.8,096-120,0.0,0,0.0
+2025-02,0.8,096-120,0.0,0,0.0
+ALL,0.8,096-120,0.0,0,0.0
+
+lead_bin=ALL, conf=0.7
+year_month,conf_thresh,lead_bin,raw_points_per_field,n_tracks,tracks_per_month
+2024-04,0.7,ALL,0.0015151515151515,0,0.0
+2025-01,0.7,ALL,0.002932551319648,0,0.0
+2025-02,0.7,ALL,0.0664335664335664,3,3.0
+ALL,0.7,ALL,0.0214211076280041,3,1.0
+```
+
+Quiet-period interpretation:
+
+- Every lead-specific recommended threshold has `tracks_per_month <= 1`.
+- FAR is acceptable under the trial-run criterion.
+- `024-048` sits exactly at `1.0` quiet tracks/month; it should be monitored in live trial.
+- The `ALL` diagnostic row is also exactly `1.0` quiet tracks/month.
+
+### 25.5 Final Operating Table
+
+`outputs/ops_operating_thresholds.csv`:
+
+```text
+lead_bin,recommended_conf_thresh,threshold_status,track_precision_2025,track_recall_2025,quiet_tracks_per_month,far_status
+000-024,0.6,OK,0.75,0.2666666666666666,0.3333333333333333,ACCEPTABLE
+024-048,0.5,OK,0.8125,0.5333333333333333,1.0,ACCEPTABLE
+048-096,0.8,OK,0.7333333333333333,0.2258064516129032,0.3333333333333333,ACCEPTABLE
+096-120,0.8,UNREACHABLE,0.5,0.0333333333333333,0.0,ACCEPTABLE
+ALL,0.7,OK,0.7205882352941176,0.6129032258064516,1.0,ACCEPTABLE
+```
+
+Ops-1 conclusion:
+
+```text
+PASS_WITH_096_120_LIMITATION
+```
+
+- 0-24, 24-48, and 48-96 have threshold settings that reach target track precision and acceptable quiet FAR.
+- 96-120 quiet FAR is clean at threshold 0.8, but 2025 track precision reaches only 0.50 and track recall is 0.033. Do not advertise 96-120h as an autonomous operational lead range yet.
+- Recommended operational trial settings:
+  - 000-024: `conf_thresh=0.6`
+  - 024-048: `conf_thresh=0.5`
+  - 048-096: `conf_thresh=0.8`
+  - 096-120: `conf_thresh=0.8`, flagged manual-review / limited-use because target precision is unreachable.
+
+### 25.6 Conservative FAR Boundary
+
+Quiet months are defined by IBTrACS in-domain truth absence. If weak unnumbered disturbances or unrecorded lows exist in those periods and the model reports them, this workflow counts them as false alarms. That makes the FAR estimate conservative and biased high, which is the safer direction for operational trial planning.
+
+### 25.7 Verification
+
+Commands:
+
+```powershell
+D:\study\envs\tc_loc\python.exe -m compileall scripts tclocator tests
+D:\study\envs\tc_loc\python.exe -m pytest -q
+```
+
+Results:
+
+```text
+compileall: passed
+pytest: 11 passed in 9.53s
+```
+
 ## 20. Step 4 Phase C Short-Lead Scaled Retrain
 
 Phase C was run after Phase A/B using only the Phase A usable AIFS months:
