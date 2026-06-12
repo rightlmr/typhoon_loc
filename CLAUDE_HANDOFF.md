@@ -1851,6 +1851,8 @@ pytest: 11 passed in 10.71s
 
 This section records the work from `D:\downloads\STEP_OPS1_THRESHOLDS_FAR.md`.
 
+Ops-2 correction note: the Ops-1 per-lead `track_recall` rows were produced by running the tracker inside each lead bin separately. That is useful as a diagnostic, but it can create a binning artifact for operational policy selection because real tracks span lead bins. Section 26 is the authority for storm-level composite-policy selection: each policy filters all lead bins first, then runs tracking once on all surviving points.
+
 Scope obeyed:
 
 - No training was run.
@@ -2514,4 +2516,159 @@ Results:
 ```text
 compileall: passed
 split tests: passed
+```
+
+## 26. Ops-2 Composite Policy Freeze Evaluation
+
+This section records the work from `D:\downloads\STEP_OPS2_POLICY_FREEZE.md`.
+
+Scope obeyed:
+
+- No training was run.
+- No prediction was rerun.
+- No label cache was rebuilt.
+- No normalization stats were recomputed.
+- `configs/finetune.yaml` was not changed.
+- Model, loss, decode, tracking, AIFS I/O, and vorticity logic were not changed.
+- New code was limited to `scripts/ops_policy_eval.py`, which calls the existing tracker once per composite policy after applying lead-specific thresholds.
+
+The full 2025 composite policy table, the 2024 validation summary, the quiet-period summary, and all decision tables are committed in:
+
+```text
+docs/ops2_policy_results.md
+```
+
+### 26.1 Inputs Reused
+
+Ops-2 reused the low-threshold Ops-1 predictions:
+
+```text
+outputs/predictions_2025_sweep.csv: 11098 rows
+outputs/predictions_2024val_sweep.csv: 18331 rows
+outputs/predictions_quiet_sweep.csv: 4362 rows
+```
+
+### 26.2 Command
+
+```powershell
+D:\study\envs\tc_loc\python.exe -u scripts\ops_policy_eval.py
+```
+
+PowerShell again wrapped the torch `pynvml` FutureWarning as `NativeCommandError`, but the script completed and wrote all expected outputs.
+
+### 26.3 Output Inventory
+
+```text
+outputs/ops_policy_sweep_2025.csv: 73 rows, 20 columns
+outputs/ops_policy_sweep_2024val.csv: 73 rows, 19 columns
+outputs/ops_policy_sweep_quiet.csv: 73 rows, 11 columns
+outputs/ops_policy_selection.csv
+outputs/ops_policy_96_120_sensitivity.csv
+outputs/ops_deployment_config_frozen.csv
+```
+
+The `outputs/` files remain intentionally untracked. Decision-driving content is reproduced in `docs/ops2_policy_results.md`.
+
+### 26.4 Selection Result
+
+Strict selection result:
+
+```text
+NO_FULLY_ELIGIBLE_POLICY
+```
+
+No policy in the requested grid satisfies both:
+
+```text
+track_precision >= 0.7 on 2025
+quiet_tracks_per_month <= 1.0
+```
+
+The minimum quiet-period FAR in the full grid is:
+
+```text
+1.3333333333333333 tracks/month
+```
+
+Therefore Ops-2 did not produce an approved autonomous frozen policy. The generated config is a review-required fallback.
+
+Selected fallback:
+
+```text
+policy_id: grid_043
+t_0_24: 0.5
+t_24_48: 0.4
+t_48_96: 0.8
+t_96_120: 0.8
+storm_recall: 0.6774193548387096
+track_precision: 0.7142857142857143
+quiet_tracks_per_month: 1.3333333333333333
+```
+
+Ops-1 baseline under the same composite-policy tracking evaluation:
+
+```text
+policy_id: ops1_baseline
+t_0_24: 0.6
+t_24_48: 0.5
+t_48_96: 0.8
+t_96_120: 0.8
+storm_recall: 0.6451612903225806
+track_precision: 0.7205882352941176
+quiet_tracks_per_month: 1.3333333333333333
+```
+
+Interpretation:
+
+- The fallback improves 2025 storm recall versus the Ops-1 baseline (`0.6774` vs `0.6452`).
+- It slightly lowers track precision (`0.7143` vs `0.7206`) but remains above the precision gate.
+- It fails the quiet FAR gate because quiet tracks remain `1.3333/month`.
+- The Ops-1 `ALL` FAR of `1.0/month` was optimistic for composite deployment because Ops-1 evaluated lead bins separately. Ops-2 runs the tracker once after lead-specific filtering and is the authoritative storm-level policy evaluation.
+
+### 26.5 96-120 Sensitivity
+
+For the selected fallback's first three lead-bin thresholds:
+
+```text
+t_96_120 = 0.8:
+storm_recall = 0.6774193548387096
+track_precision = 0.7142857142857143
+quiet_tracks_per_month = 1.3333333333333333
+
+t_96_120 = EXCLUDE:
+storm_recall = 0.6774193548387096
+track_precision = 0.6901408450704225
+quiet_tracks_per_month = 1.3333333333333333
+```
+
+Conclusion: excluding 96-120 does not reduce quiet FAR and drops 2025 track precision below `0.7`. If this fallback is used for review-only operations, keep `096-120` at threshold `0.8`; do not treat it as an autonomous deployment range.
+
+### 26.6 Frozen Config Output
+
+`outputs/ops_deployment_config_frozen.csv`:
+
+```text
+lead_bin,conf_thresh,mode
+000-024,0.5,REVIEW_REQUIRED
+024-048,0.4,REVIEW_REQUIRED
+048-096,0.8,REVIEW_REQUIRED
+096-120,0.8,REVIEW_REQUIRED
+```
+
+This file is intentionally named per the Ops-2 spec, but its contents are not an auto-freeze. The status is review-required because the strict FAR gate is infeasible with the current grid and current model outputs.
+
+### 26.7 Verification
+
+Verification after adding `scripts/ops_policy_eval.py` and documenting the results:
+
+```powershell
+D:\study\envs\tc_loc\python.exe -m compileall scripts tclocator tests
+D:\study\envs\tc_loc\python.exe -m pytest -q
+```
+
+Results:
+
+```text
+compileall: passed
+pytest: 11 passed in 11.40s
 ```
