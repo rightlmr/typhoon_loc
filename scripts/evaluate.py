@@ -47,6 +47,9 @@ def _build_references(config: dict[str, Any], split: str) -> pd.DataFrame:
     paths = config.get("paths", {})
     files = iter_files(paths.get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"])
     files = select_aifs_files(config, files, split)
+    lead_max = config.get("finetune", {}).get("lead_max")
+    if lead_max is not None:
+        files = [path for path in files if parse_aifs_filename(path).forecast_hour <= int(lead_max)]
     ib_path = Path(paths.get("ibtracs_csv", ""))
     if not files or not ib_path.exists():
         return pd.DataFrame()
@@ -120,6 +123,14 @@ def _with_split_suffix(path: Path, split: str) -> Path:
     return path.with_name(f"{path.stem}_{split}{path.suffix}")
 
 
+def _with_output_suffix(path: Path, suffix: str | None) -> Path:
+    """Return an output path with an explicit suffix before the extension."""
+
+    if not suffix:
+        return path
+    return path.with_name(f"{path.stem}{suffix}{path.suffix}")
+
+
 def _attach_reference_month(matched: pd.DataFrame, references: pd.DataFrame) -> pd.DataFrame:
     """Attach AIFS initialization month to matched rows."""
 
@@ -186,6 +197,7 @@ def main() -> int:
     parser.add_argument("--config", default=str(ROOT / "configs" / "infer.yaml"))
     parser.add_argument("--predictions", default=None)
     parser.add_argument("--split", choices=["all", "train", "val"], default="all")
+    parser.add_argument("--suffix", default=None)
     parser.add_argument("--smoke-synthetic", action="store_true")
     args = parser.parse_args()
 
@@ -216,6 +228,11 @@ def main() -> int:
     month_path = _with_split_suffix(out_dir / "metrics_by_month.csv", args.split)
     month_lead_path = _with_split_suffix(out_dir / "metrics_by_month_lead.csv", args.split)
     pr_path = _with_split_suffix(out_dir / "precision_recall.csv", args.split)
+    matched_path = _with_output_suffix(matched_path, args.suffix)
+    summary_path = _with_output_suffix(summary_path, args.suffix)
+    month_path = _with_output_suffix(month_path, args.suffix)
+    month_lead_path = _with_output_suffix(month_lead_path, args.suffix)
+    pr_path = _with_output_suffix(pr_path, args.suffix)
     matched.to_csv(matched_path, index=False)
     summary.to_csv(summary_path, index=False)
     by_month.to_csv(month_path, index=False)

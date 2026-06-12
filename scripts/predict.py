@@ -73,6 +73,25 @@ def _with_split_suffix(path: Path, split: str) -> Path:
     return path.with_name(f"{path.stem}_{split}{path.suffix}")
 
 
+def _lead_max_from_config(config: dict[str, Any]) -> int | None:
+    """Return configured AIFS forecast lead limit, if present."""
+
+    raw = config.get("finetune", {}).get("lead_max")
+    return int(raw) if raw is not None else None
+
+
+def _filter_by_lead_max(files: list[Path], lead_max: int | None) -> list[Path]:
+    """Filter AIFS files to the configured maximum forecast lead."""
+
+    if lead_max is None:
+        return files
+    kept: list[Path] = []
+    for path in files:
+        if parse_aifs_filename(path).forecast_hour <= lead_max:
+            kept.append(path)
+    return kept
+
+
 def main() -> int:
     """CLI entry point."""
 
@@ -81,6 +100,7 @@ def main() -> int:
     parser.add_argument("--domain", choices=["aifs", "era5"], default="aifs")
     parser.add_argument("--split", choices=["all", "train", "val"], default="all")
     parser.add_argument("--checkpoint", default=None)
+    parser.add_argument("--output", default=None)
     parser.add_argument("--smoke-synthetic", action="store_true")
     args = parser.parse_args()
 
@@ -100,6 +120,7 @@ def main() -> int:
         norm_stats = load_norm_stats(norm_path) if norm_path.exists() else None
         files = iter_files(config.get("paths", {}).get("aifs_dir", ""), [".grib2", ".grb2", ".grib", ".pt"])
         files = select_aifs_files(config, files, args.split)
+        files = _filter_by_lead_max(files, _lead_max_from_config(config))
         domain_cfg = DomainConfig.from_mapping(config.get("domain"))
         for index, path in enumerate(files, start=1):
             if index % 200 == 0:
@@ -121,8 +142,9 @@ def main() -> int:
             rows.append(_predict_array(model, field, config, device, iso_time=path.stem, lead_hour=None))
 
     out = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=["ISO_TIME", "LAT", "LON", "CONF"])
-    out_path = Path(config.get("paths", {}).get("predictions_csv", ROOT / "outputs" / "predictions.csv"))
-    out_path = _with_split_suffix(out_path, args.split)
+    out_path = Path(args.output) if args.output else Path(config.get("paths", {}).get("predictions_csv", ROOT / "outputs" / "predictions.csv"))
+    if not args.output:
+        out_path = _with_split_suffix(out_path, args.split)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(out_path, index=False)
     print(f"Wrote {out_path}")

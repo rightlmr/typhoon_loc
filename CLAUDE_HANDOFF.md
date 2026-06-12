@@ -1701,6 +1701,152 @@ compileall: passed
 pytest: 11 passed in 15.03s
 ```
 
+## 24. E-a Zero-Cost Cross-Year Evaluation
+
+This section records the work from `D:\downloads\STEP_EA_CROSSYEAR_EVAL.md`.
+
+Scope obeyed:
+
+- No training was run.
+- No label cache was rebuilt.
+- No normalization stats were recomputed.
+- `configs/finetune.yaml` was not changed.
+- `configs/infer.yaml` was changed only for E-a inference/evaluation: `data.usable_months = ["2025-07", "2025-08"]`.
+- `scripts/predict.py` gained `--output` and applies configured `finetune.lead_max` to AIFS inference file selection.
+- `scripts/evaluate.py` gained `--suffix` and applies configured `finetune.lead_max` to AIFS reference construction.
+
+### 24.1 Checkpoint Verification
+
+Phase D checkpoint byte identity was verified:
+
+```text
+outputs/finetune_best.ckpt
+outputs/m4_phaseD_lead120_infield/finetune_best.ckpt
+```
+
+Both files have the same SHA256:
+
+```text
+DD4BB25F35A1D5B6AA06ED14DE64CE45D9E4348663DFA029AC5E05464732C2D2
+```
+
+Therefore E-a used the current `outputs/finetune_best.ckpt` through `configs/infer.yaml`.
+
+### 24.2 Commands
+
+Prediction:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\predict.py --config configs\infer.yaml --domain aifs --split all --output outputs\predictions_2025.csv
+```
+
+Evaluation:
+
+```powershell
+D:\study\envs\tc_loc\python.exe scripts\evaluate.py --config configs\infer.yaml --split all --predictions outputs\predictions_2025.csv --suffix _2025
+```
+
+Outputs:
+
+```text
+outputs/predictions_2025.csv
+outputs/matched_metrics_2025.csv
+outputs/metrics_by_lead_2025.csv
+outputs/metrics_by_month_2025.csv
+outputs/metrics_by_month_lead_2025.csv
+outputs/precision_recall_2025.csv
+outputs/cross_year_2024train_2025test.csv
+```
+
+PowerShell wrapped the `pynvml` FutureWarning as a `NativeCommandError`, but both scripts completed and wrote all expected outputs.
+
+### 24.3 2025 Metrics
+
+`outputs/metrics_by_lead_2025.csv`:
+
+```text
+lead_bin,n_ref,recall,loc_error_median_km,track_bias_median_km,end2end_median_km
+000-024,619,0.6736672051696284,26.68899974260427,33.79127836731036,44.47339217184459
+024-048,620,0.6064516129032258,27.79727413682221,54.98566689036615,78.30617448121407
+048-096,1238,0.420032310177706,83.39860083071966,75.8525234917184,152.2679843391481
+096-120,619,0.2455573505654281,192.99639210457883,77.52593579727674,250.42036881755487
+```
+
+`outputs/metrics_by_month_2025.csv`:
+
+```text
+year_month,n_ref,recall,loc_error_median_km,track_bias_median_km,end2end_median_km
+2025-07,1597,0.43519098309329995,83.39971292076079,72.3471388583187,152.2679843391481
+2025-08,1655,0.4827794561933535,55.60655685503367,67.57196262688257,118.38048103454257
+```
+
+`outputs/metrics_by_month_lead_2025.csv`:
+
+```text
+year_month,lead_bin,n_ref,recall,loc_error_median_km,track_bias_median_km,end2end_median_km
+2025-07,000-024,278,0.7194244604316546,26.078664670293428,37.36540698490772,44.29336210196678
+2025-07,024-048,292,0.6472602739726028,27.795018453143882,59.742304093080385,72.88576563652262
+2025-07,048-096,622,0.38263665594855306,98.64025191711735,77.38211585956243,168.22197501029135
+2025-07,096-120,323,0.1826625386996904,299.55463130111536,76.8427715483368,329.0954198469375
+2025-08,000-024,341,0.6363636363636364,26.811495251190035,30.77794554568176,44.47339217184459
+2025-08,024-048,328,0.5701219512195121,27.805575299644474,53.5392397883598,83.55174001375545
+2025-08,048-096,616,0.4577922077922078,60.507660291689135,73.93204881117899,124.73418110389579
+2025-08,096-120,296,0.3141891891891892,131.90233324184953,77.85927277612325,200.29151320176965
+```
+
+`outputs/precision_recall_2025.csv`:
+
+```text
+conf_thresh,precision,recall
+0.1,0.23601895734597156,0.45940959409594095
+0.2,0.33647718582717306,0.4059040590405904
+0.3,0.39531727180183235,0.3582410824108241
+0.5,0.46225895316804405,0.2579950799507995
+0.7,0.501532175689479,0.1509840098400984
+```
+
+### 24.4 Cross-Year Comparison
+
+`outputs/cross_year_2024train_2025test.csv`:
+
+```text
+lead_bin,recall_2024_val,end2end_2024_val_km,recall_2025_test,end2end_2025_test_km,recall_delta_abs,recall_rel_change,end2end_delta_km,end2end_rel_change
+000-024,0.6960526315789474,41.67780291017181,0.6736672051696284,44.47339217184459,-0.022385426409318954,-0.032160536996375055,2.7955892616727738,0.06707621483066438
+024-048,0.65748031496063,69.93114192358084,0.6064516129032258,78.30617448121407,-0.051028702057404174,-0.0776125169016806,8.375032557633233,0.11976112969505458
+048-096,0.4494750656167979,134.6083091745813,0.420032310177706,152.2679843391481,-0.029442755439091917,-0.06550475808638843,17.659675164566778,0.13119305392702707
+096-120,0.300132802124834,201.875570731127,0.2455573505654281,250.42036881755487,-0.05457545155940591,-0.18183767709837453,48.544798086427875,0.240468908202288
+```
+
+Interpretation:
+
+- Cross-year degradation is within the E-a `~25%` guideline for every lead bin.
+- Recall relative decline ranges from `3.2%` to `18.2%`.
+- End-to-end median relative degradation ranges from `6.7%` to `24.0%`.
+- The weakest cell is `2025-07 / 096-120h`: recall `0.183`, end-to-end median `329.10 km`. This is materially weaker, but it is not a hard collapse under the document's examples: recall is not halved relative to the 2024 aggregate, and end-to-end error is not doubled.
+- `2025-08` is close to or better than the 2024 aggregate at long lead (`096-120h end2end=200.29 km` vs 2024 val `201.88 km`).
+
+E-a conclusion:
+
+```text
+PASS_MEASURED: Phase D checkpoint is cross-year usable on unlocked 2025-07/08, with mild to moderate degradation and a known weak long-lead July cell.
+```
+
+### 24.5 Verification
+
+Commands:
+
+```powershell
+D:\study\envs\tc_loc\python.exe -m compileall scripts tests tclocator
+D:\study\envs\tc_loc\python.exe -m pytest -q
+```
+
+Results:
+
+```text
+compileall: passed
+pytest: 11 passed in 10.71s
+```
+
 ## 20. Step 4 Phase C Short-Lead Scaled Retrain
 
 Phase C was run after Phase A/B using only the Phase A usable AIFS months:
